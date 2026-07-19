@@ -1,0 +1,144 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-fraunces);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --radius: 0.625rem;
+}
+
+/* Midnight Luxury — the app's only palette. Applied via a hardcoded "dark"
+   class on <html> in layout.tsx (no toggle, no next-themes) rather than
+   collapsing into :root, so shadcn primitives' existing dark: utility
+   variants (the @custom-variant above) keep working unchanged. */
+.dark {
+  --background: #0b0a12;
+  --foreground: #f3ead8;
+  --card: #15121f;
+  --card-foreground: #f3ead8;
+  --popover: #15121f;
+  --popover-foreground: #f3ead8;
+  --primary: #7c6cf0;
+  --primary-foreground: #0b0a12;
+  --secondary: #1c1830;
+  --secondary-foreground: #f3ead8;
+  --muted: #1c1830;
+  --muted-foreground: #a99bd1;
+  --accent: #7c6cf0;
+  --accent-foreground: #0b0a12;
+  --destructive: oklch(68% 0.2 25);
+  --border: #2a2438;
+  --input: #2a2438;
+  --ring: #7c6cf0;
+  --chart-1: #7c6cf0;
+  --chart-2: #2dd4c5;
+  --chart-3: #e8c874;
+  --chart-4: #ff8a65;
+  --chart-5: #a99bd1;
+  --sidebar: #15121f;
+  --sidebar-foreground: #f3ead8;
+  --sidebar-primary: #7c6cf0;
+  --sidebar-primary-foreground: #0b0a12;
+  --sidebar-accent: #1c1830;
+  --sidebar-accent-foreground: #f3ead8;
+  --sidebar-border: #2a2438;
+  --sidebar-ring: #7c6cf0;
+
+  /* Semantic aliases used directly by admin panel component code (var(--x) arbitrary
+     Tailwind values, e.g. text-[var(--ink-muted)]) — these ride on top of the shadcn
+     tokens above rather than duplicating them. */
+  --bg: var(--background);
+  --surface: var(--card);
+  --ink: var(--foreground);
+  --ink-muted: var(--muted-foreground);
+  --success: #2dd4c5;
+  --warning: #ff8a65;
+
+  /* Brand gradient system — violet/teal/coral/magenta/gold, each a from/to stop
+     for linear-gradient() fills plus a matching glow box-shadow token. Gold is
+     reserved for the one "premium hero" moment (see kpi-card.tsx usage), not
+     spread across the UI. */
+  --brand-violet-from: #7c6cf0;
+  --brand-violet-to: #5b3ff0;
+  --brand-teal-from: #2dd4c5;
+  --brand-teal-to: #0b8578;
+  --brand-coral-from: #ff8a65;
+  --brand-coral-to: #e2492a;
+  --brand-magenta-from: #e0499e;
+  --brand-magenta-to: #b52e79;
+  --brand-gold-from: #e8c874;
+  --brand-gold-to: #b8912e;
+
+  --glow-violet: 0 0 16px rgba(124, 108, 240, 0.6);
+  --glow-teal: 0 0 16px rgba(45, 212, 197, 0.6);
+  --glow-coral: 0 0 16px rgba(255, 138, 101, 0.6);
+  --glow-magenta: 0 0 16px rgba(224, 73, 158, 0.6);
+  --glow-gold: 0 0 16px rgba(184, 145, 46, 0.55);
+  --danger: var(--destructive);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

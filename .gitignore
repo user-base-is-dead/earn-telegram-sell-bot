@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Runtime data
+data/
+*.db
+*.sqlite3
+
+# QR temp files
+*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+# env/
+
+# IDE / OS
+.vscode/
+.idea/
+# .DS_Store
+Thumbs.db
+
+.superpowers/
