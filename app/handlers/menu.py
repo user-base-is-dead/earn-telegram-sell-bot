@@ -182,6 +182,17 @@ async def mode_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     auto = config.is_auto_mode()
+    # Only advertise the payment methods actually enabled in config — never
+    # hardcode "UPI / Binance Pay / Crypto", or a buyer is told about options
+    # they can't use (e.g. Binance Pay while only a crypto address is set).
+    _enabled = []
+    if config.upi_enabled():
+        _enabled.append("UPI")
+    if config.binance_pay_enabled():
+        _enabled.append("Binance Pay")
+    if config.blockchain_enabled():
+        _enabled.append("Crypto")
+    pay_methods = " / ".join(_enabled) or "Crypto"
     lines = [
         f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n",
         f"{cemoji('info', 'ℹ️')} <b>How to buy</b>",
@@ -208,7 +219,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "<blockquote>"
                 f"{cemoji('step1', '1️⃣')} Tap <b>{cemoji('cart', '🛍')} Browse products</b>\n"
                 f"{cemoji('step2', '2️⃣')} Pick a product, then <b>{cemoji('cart', '🛒')} Buy now</b>\n"
-                f"{cemoji('step3', '3️⃣')} Choose UPI / Binance Pay / Crypto\n"
+                f"{cemoji('step3', '3️⃣')} Choose {pay_methods}\n"
                 f"{cemoji('step4', '4️⃣')} Pay the <b>exact amount</b>, tap "
                 f"<b>{cemoji('check', '✅')} I've Paid</b>, and send your UTR / TxID / screenshot\n"
                 f"{cemoji('step5', '5️⃣')} Your product is delivered here once we review your payment"
