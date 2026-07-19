@@ -4,8 +4,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import asyncpg
-
+from app.db import _compat as asyncpg
 from app.db.schema import DEPOSIT_CREDITED, DEPOSIT_PENDING, DEPOSIT_REJECTED, _connect, _now
 
 
@@ -225,8 +224,14 @@ async def delete_wallet_data_for_users(user_ids: list[int], rail: str, tx_ref: s
     row. Used only by app.services.crypto_watch's self-check to clean up after
     itself, so its self-check can be re-run without manual DB intervention."""
     async with _connect() as conn:
-        await conn.execute("DELETE FROM wallet_ledger WHERE user_id = ANY($1::bigint[])", user_ids)
-        await conn.execute("DELETE FROM deposits WHERE user_id = ANY($1::bigint[])", user_ids)
+        if user_ids:
+            placeholders = ", ".join(f"${i + 1}" for i in range(len(user_ids)))
+            await conn.execute(
+                f"DELETE FROM wallet_ledger WHERE user_id IN ({placeholders})", *user_ids
+            )
+            await conn.execute(
+                f"DELETE FROM deposits WHERE user_id IN ({placeholders})", *user_ids
+            )
         await conn.execute(
             "DELETE FROM processed_tx WHERE rail = $1 AND tx_ref = $2", rail, tx_ref
         )

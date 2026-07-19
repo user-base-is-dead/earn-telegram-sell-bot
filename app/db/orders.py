@@ -3,8 +3,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional
 
-import asyncpg
-
+from app.db import _compat as asyncpg
 from app.db.schema import STATUS_APPROVED, STATUS_CREATED, STATUS_PENDING, STATUS_REJECTED, _REF_ALPHABET, _connect, _now
 
 
@@ -166,7 +165,7 @@ async def clear_successful_orders() -> int:
         # Reset the id sequence only if no orders remain at all.
         remaining = await conn.fetchval("SELECT COUNT(*) FROM orders")
         if remaining == 0:
-            await conn.execute("ALTER SEQUENCE orders_id_seq RESTART WITH 1")
+            await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'orders'")
         return n
 
 
@@ -181,12 +180,12 @@ async def clear_data(wipe_products: bool = False) -> dict:
     async with _connect() as conn:
         orders = await conn.fetchval("SELECT COUNT(*) FROM orders")
         await conn.execute("DELETE FROM orders")
-        await conn.execute("ALTER SEQUENCE orders_id_seq RESTART WITH 1")
+        await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'orders'")
         products = 0
         if wipe_products:
             products = await conn.fetchval("SELECT COUNT(*) FROM products")
             await conn.execute("DELETE FROM products")
-            await conn.execute("ALTER SEQUENCE products_id_seq RESTART WITH 1")
+            await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'products'")
         return {"orders": orders, "products": products}
 
 

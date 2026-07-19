@@ -1,8 +1,7 @@
 """Product CRUD and the auto-delivery key pool."""
 from typing import Optional
 
-import asyncpg
-
+from app.db import _compat as asyncpg
 from app.db.schema import UNLIMITED_STOCK, _connect, _now
 
 
@@ -234,27 +233,29 @@ async def clear_expired_offers() -> list[asyncpg.Record]:
 async def pop_unused_keys(product_id: int, order_id: int, n: int = 1) -> Optional[list[str]]:
     """Atomically claim n unused codes for this product, all-or-nothing. Returns
     the list of n codes, or None if fewer than n were available — in that case
-    nothing is mutated (the SELECT only locks rows; the UPDATE never runs
-    unless all n were found), so a shortfall is a clean no-op, not a partial claim.
+    nothing is mutated (the UPDATE never runs unless all n were found), so a
+    shortfall is a clean no-op, not a partial claim.
 
-    FOR UPDATE SKIP LOCKED is required here (and wasn't under SQLite): Postgres allows
-    real concurrent transactions, so without a row lock two simultaneous buyers could
-    both read the same unused key before either UPDATE commits.
+    Under SQLite this is safe without any row lock: the whole _connect() block
+    runs inside one process-wide serialized transaction (see app.db.schema),
+    so two simultaneous buyers can't both read the same unused key before either
+    UPDATE commits.
     """
     async with _connect() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
                 """SELECT id, code FROM product_keys
                    WHERE product_id = $1 AND used = 0
-                   ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED""",
+                   ORDER BY id LIMIT $2""",
                 product_id, n,
             )
             if len(rows) < n:
                 return None
             ids = [r["id"] for r in rows]
+            placeholders = ", ".join(f"${i + 2}" for i in range(len(ids)))
             await conn.execute(
-                "UPDATE product_keys SET used = 1, used_by_order_id = $1 WHERE id = ANY($2::bigint[])",
-                order_id, ids,
+                f"UPDATE product_keys SET used = 1, used_by_order_id = $1 WHERE id IN ({placeholders})",
+                order_id, *ids,
             )
             return [r["code"] for r in rows]
 

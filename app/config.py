@@ -105,7 +105,15 @@ CRYPTO_FEE_USDT = _get_float(os.getenv("CRYPTO_FEE_USDT", ""), 0.2)
 DAILY_DIGEST_HOUR_UTC = _get_int(os.getenv("DAILY_DIGEST_HOUR_UTC", ""), 20)
 
 
-# Managed Postgres (Supabase) connection string. Required — see .env.example.
+# Local SQLite database file. Relative paths resolve from wherever the bot is
+# started (the project root for `python bot.py`), so the default keeps the DB
+# beside the code; point it elsewhere (e.g. ../earn-seller-bot-db-main/store.db)
+# to store it in a separate folder/repo. Its parent dir is created at startup.
+DB_PATH = os.getenv("DB_PATH", "data/store.db").strip() or "data/store.db"
+
+# Legacy Postgres connection string — no longer used by the bot (it runs on the
+# local SQLite file above). Kept only so the historical migrate_to_postgres.py /
+# verify_postgres_migration.py tooling still imports; not required to run.
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # --- Network / connection to Telegram ---
@@ -167,8 +175,8 @@ def validate() -> None:
         missing.append("BOT_TOKEN")
     if not ADMIN_IDS:
         missing.append("ADMIN_IDS")
-    if not DATABASE_URL:
-        missing.append("DATABASE_URL")
+    if not DB_PATH:
+        missing.append("DB_PATH")
     if missing:
         raise SystemExit(
             "Missing required environment variables: "
@@ -189,15 +197,16 @@ def validate() -> None:
 
 def require_disposable_db_for_selfcheck() -> None:
     """Self-check scripts (crypto_watch._demo, products._demo, etc.) write real
-    rows and must never run against a shared/production database by accident.
-    Require an explicit ALLOW_SELFCHECK_DB=1 alongside DATABASE_URL, so running
+    rows and must never run against a real store by accident. Require an explicit
+    ALLOW_SELFCHECK_DB=1 alongside DB_PATH, so running e.g.
     `python -m app.services.crypto_watch` with a normal .env loaded fails loudly
-    instead of writing test rows into production."""
+    instead of writing test rows into the live SQLite file. Point DB_PATH at a
+    disposable/scratch file first (e.g. data/selfcheck.db)."""
     if os.getenv("ALLOW_SELFCHECK_DB", "").strip() != "1":
         raise SystemExit(
-            "Refusing to run: this self-check writes real rows to DATABASE_URL.\n"
-            "Point .env's DATABASE_URL at a disposable/scratch database, then re-run "
-            "with ALLOW_SELFCHECK_DB=1 set (e.g.:\n"
+            "Refusing to run: this self-check writes real rows to DB_PATH.\n"
+            f"Point .env's DB_PATH at a disposable/scratch file (currently {DB_PATH!r}),\n"
+            "then re-run with ALLOW_SELFCHECK_DB=1 set (e.g.:\n"
             "  ALLOW_SELFCHECK_DB=1 python -m app.services.crypto_watch"
         )
 

@@ -97,13 +97,13 @@ async def main() -> None:
                 await conn.execute("DELETE FROM orders")
                 remaining = await conn.fetchval("SELECT COUNT(*) FROM orders")
                 if remaining == 0:
-                    await conn.execute("ALTER SEQUENCE orders_id_seq RESTART WITH 1")
+                    await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'orders'")
                 print("Cleared all orders; the next order will be #1.")
             if wipe_all:
                 await conn.execute("DELETE FROM product_keys")
-                await conn.execute("ALTER SEQUENCE product_keys_id_seq RESTART WITH 1")
+                await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'product_keys'")
                 await conn.execute("DELETE FROM products")
-                await conn.execute("ALTER SEQUENCE products_id_seq RESTART WITH 1")
+                await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'products'")
                 print("Cleared all products (and their delivery keys); the next product will be #1.")
             if wipe_users:
                 # No FK constraints tie these to users.user_id (see app/db/schema.py),
@@ -112,11 +112,11 @@ async def main() -> None:
                 # deposits left to match against, resuming from an old block cursor
                 # would just rescan history for nothing.
                 await conn.execute("DELETE FROM wallet_ledger")
-                await conn.execute("ALTER SEQUENCE wallet_ledger_id_seq RESTART WITH 1")
+                await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'wallet_ledger'")
                 await conn.execute("DELETE FROM deposits")
-                await conn.execute("ALTER SEQUENCE deposits_id_seq RESTART WITH 1")
+                await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'deposits'")
                 await conn.execute("DELETE FROM processed_tx")
-                await conn.execute("ALTER SEQUENCE processed_tx_id_seq RESTART WITH 1")
+                await conn.execute("DELETE FROM sqlite_sequence WHERE name = 'processed_tx'")
                 await conn.execute("DELETE FROM chain_cursor")
                 await conn.execute("DELETE FROM users")
                 print("Cleared all users, wallet balances, and deposit/transaction history.")

@@ -1,9 +1,32 @@
-"""Connection pool helper, schema, and shared status constants (Postgres via asyncpg)."""
+"""Connection helper, schema, and shared status constants (local SQLite via aiosqlite).
+
+This module used to wrap a managed Postgres pool (asyncpg). It now backs onto a
+single local SQLite file (config.DB_PATH, e.g. ../earn-seller-bot-db-main/store.db)
+through a thin asyncpg-compatible shim, so the query modules in app/db/*.py keep
+their exact call surface — ``conn.fetch/fetchrow/fetchval/execute/executemany``,
+``$1`` placeholders, ``conn.transaction()`` and ``asyncpg.Record``-style rows —
+without a rewrite of every caller.
+
+How the shim maps to SQLite:
+  * ``$1, $2 ...`` positional placeholders are rewritten to SQLite's numbered
+    ``?1, ?2 ...`` form (so a repeated/out-of-order ``$N`` still binds correctly).
+  * ``FOR UPDATE [SKIP LOCKED]`` is stripped — every DB block runs under one
+    process-wide asyncio lock inside a single transaction, which serializes
+    writers more strictly than the row locks the Postgres code relied on.
+  * ``execute()`` returns an asyncpg-style command tag ("UPDATE 1", "DELETE 3")
+    so callers that inspect it (``result.endswith(" 1")`` / ``result.split()``)
+    keep working.
+  * rows are ``sqlite3.Row`` (index + name access + ``.keys()``).
+"""
+import asyncio
+import os
+import re
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, Sequence
 
-import asyncpg
+import aiosqlite
 
 from app import config
 
@@ -30,34 +53,107 @@ STORE_MODE_MANUAL = "manual"    # UPI/Binance Pay/Crypto, admin reviews + delive
 # alphabet (no 0/O/1/I/L) so it never collides with or resembles an old ID.
 _REF_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 
-_pool: Optional[asyncpg.Pool] = None
+# --------------------------------------------------------------------------- #
+# asyncpg -> SQLite dialect shim
+# --------------------------------------------------------------------------- #
+Record = sqlite3.Row  # asyncpg.Record stand-in: index + name access + .keys()
+
+_PLACEHOLDER_RE = re.compile(r"\$(\d+)")
+# Strips a trailing "FOR UPDATE" / "FOR UPDATE SKIP LOCKED" (Postgres row locks
+# SQLite has no equivalent for — the process-wide lock makes them unnecessary).
+_FOR_UPDATE_RE = re.compile(r"\s+FOR\s+UPDATE(\s+SKIP\s+LOCKED)?", re.IGNORECASE)
+
+
+def _translate(sql: str) -> str:
+    """Rewrite Postgres-flavoured SQL into what SQLite accepts. Only the two
+    differences the query modules actually use are handled here; anything more
+    exotic (arrays, ALTER SEQUENCE) is rewritten at the call site instead."""
+    sql = _FOR_UPDATE_RE.sub("", sql)
+    sql = _PLACEHOLDER_RE.sub(r"?\1", sql)
+    return sql
+
+
+class Connection:
+    """asyncpg.Connection-compatible facade over one aiosqlite connection."""
+
+    def __init__(self, conn: "aiosqlite.Connection") -> None:
+        self._conn = conn
+
+    async def fetch(self, sql: str, *args: Any) -> list[sqlite3.Row]:
+        cur = await self._conn.execute(_translate(sql), args)
+        try:
+            return list(await cur.fetchall())
+        finally:
+            await cur.close()
+
+    async def fetchrow(self, sql: str, *args: Any) -> Optional[sqlite3.Row]:
+        cur = await self._conn.execute(_translate(sql), args)
+        try:
+            return await cur.fetchone()
+        finally:
+            await cur.close()
+
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        row = await self.fetchrow(sql, *args)
+        if row is None:
+            return None
+        return row[0]
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        cur = await self._conn.execute(_translate(sql), args)
+        try:
+            verb = sql.strip().split(None, 1)[0].upper() if sql.strip() else ""
+            count = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+            return f"{verb} {count}"
+        finally:
+            await cur.close()
+
+    async def executemany(self, sql: str, args_seq: Sequence[Sequence[Any]]) -> str:
+        cur = await self._conn.executemany(_translate(sql), list(args_seq))
+        try:
+            return "EXECUTE"
+        finally:
+            await cur.close()
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator["Connection"]:
+        """No-op nested transaction: the surrounding _connect() block already
+        runs inside a single serialized transaction, so a nested asyncpg-style
+        .transaction() needs no separate savepoint to stay all-or-nothing."""
+        yield self
+
+
+_conn: Optional[aiosqlite.Connection] = None
+_lock: Optional[asyncio.Lock] = None
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS products (
-    id              BIGSERIAL PRIMARY KEY,
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
-    price           DOUBLE PRECISION NOT NULL,
-    price_inr       DOUBLE PRECISION NOT NULL DEFAULT 0,
+    price           REAL NOT NULL,
+    price_inr       REAL NOT NULL DEFAULT 0,
     content         TEXT NOT NULL DEFAULT '',
     stock           INTEGER NOT NULL DEFAULT -1,
     active          INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
-    offer_price     DOUBLE PRECISION NOT NULL DEFAULT 0,
-    offer_price_inr DOUBLE PRECISION NOT NULL DEFAULT 0,
+    offer_price     REAL NOT NULL DEFAULT 0,
+    offer_price_inr REAL NOT NULL DEFAULT 0,
     offer_until     TEXT NOT NULL DEFAULT '',
     name_html       TEXT,
-    description_html TEXT
+    description_html TEXT,
+    icon_char       TEXT,
+    icon_emoji_id   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS orders (
-    id            BIGSERIAL PRIMARY KEY,
-    user_id       BIGINT NOT NULL,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER NOT NULL,
     username      TEXT NOT NULL DEFAULT '',
-    product_id    BIGINT NOT NULL REFERENCES products(id),
+    product_id    INTEGER NOT NULL REFERENCES products(id),
     product_name  TEXT NOT NULL,
-    amount        DOUBLE PRECISION NOT NULL,
-    amount_usdt   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    amount        REAL NOT NULL,
+    amount_usdt   REAL NOT NULL DEFAULT 0,
     qty           INTEGER NOT NULL DEFAULT 1,
     status        TEXT NOT NULL,
     utr           TEXT NOT NULL DEFAULT '',
@@ -72,19 +168,20 @@ CREATE INDEX IF NOT EXISTS idx_orders_user     ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
 
 CREATE TABLE IF NOT EXISTS users (
-    user_id              BIGINT PRIMARY KEY,
+    user_id              INTEGER PRIMARY KEY,
     first_name           TEXT NOT NULL DEFAULT '',
     username             TEXT NOT NULL DEFAULT '',
     started_at           TEXT NOT NULL,
     clicks               INTEGER NOT NULL DEFAULT 0,
-    wallet_balance_micro BIGINT NOT NULL DEFAULT 0
+    wallet_balance_micro INTEGER NOT NULL DEFAULT 0,
+    notes                TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS deposits (
-    id                  BIGSERIAL PRIMARY KEY,
-    user_id             BIGINT NOT NULL,
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER NOT NULL,
     rail                TEXT NOT NULL,
-    tagged_amount_micro BIGINT NOT NULL,
+    tagged_amount_micro INTEGER NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
     created_at          TEXT NOT NULL,
     expires_at          TEXT NOT NULL,
@@ -94,34 +191,32 @@ CREATE TABLE IF NOT EXISTS deposits (
 -- Two pending deposits on the same rail can never share a tagged amount — the
 -- watcher matches an incoming transfer to a deposit by amount alone, so a
 -- collision would let one buyer's payment get credited to a different buyer.
--- Enforced here (not just by picking an unused amount before inserting) so a
--- race between two concurrent top-up requests can't create one anyway.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deposits_pending_tag
     ON deposits(rail, tagged_amount_micro) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_deposits_rail_status ON deposits(rail, status);
 
 CREATE TABLE IF NOT EXISTS wallet_ledger (
-    id                   BIGSERIAL PRIMARY KEY,
-    user_id              BIGINT NOT NULL,
-    delta_micro          BIGINT NOT NULL,
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id              INTEGER NOT NULL,
+    delta_micro          INTEGER NOT NULL,
     reason               TEXT NOT NULL,
     ref                  TEXT NOT NULL DEFAULT '',
-    balance_after_micro  BIGINT NOT NULL,
+    balance_after_micro  INTEGER NOT NULL,
     created_at           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wallet_ledger_user ON wallet_ledger(user_id);
 
 CREATE TABLE IF NOT EXISTS product_keys (
-    id               BIGSERIAL PRIMARY KEY,
-    product_id       BIGINT NOT NULL REFERENCES products(id),
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id       INTEGER NOT NULL REFERENCES products(id),
     code             TEXT NOT NULL,
     used             INTEGER NOT NULL DEFAULT 0,
-    used_by_order_id BIGINT
+    used_by_order_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_product_keys_unused ON product_keys(product_id, used);
 
 CREATE TABLE IF NOT EXISTS processed_tx (
-    id          BIGSERIAL PRIMARY KEY,
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
     rail        TEXT NOT NULL,
     tx_ref      TEXT NOT NULL,
     credited_at TEXT NOT NULL,
@@ -130,7 +225,7 @@ CREATE TABLE IF NOT EXISTS processed_tx (
 
 CREATE TABLE IF NOT EXISTS chain_cursor (
     rail       TEXT PRIMARY KEY,
-    last_block BIGINT NOT NULL
+    last_block INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -141,56 +236,89 @@ INSERT INTO bot_settings (id, store_mode) VALUES (1, 'auto') ON CONFLICT (id) DO
 """
 
 
+async def _column_exists(conn: aiosqlite.Connection, table: str, column: str) -> bool:
+    cur = await conn.execute(f"PRAGMA table_info({table})")
+    try:
+        rows = await cur.fetchall()
+    finally:
+        await cur.close()
+    return any(r[1] == column for r in rows)  # r[1] = column name
+
+
+async def _add_column_if_missing(
+    conn: aiosqlite.Connection, table: str, column: str, decl: str
+) -> None:
+    """SQLite has no ``ADD COLUMN IF NOT EXISTS``; emulate it so upgrading an
+    already-existing local store.db from an older schema is a safe no-op."""
+    if not await _column_exists(conn, table, column):
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 async def init_pool() -> None:
-    """Create the connection pool and the schema if it doesn't exist yet. Call once
-    at startup, from inside a running event loop (e.g. python-telegram-bot's post_init)."""
-    global _pool
-    # statement_cache_size=0: Supabase's transaction-mode pooler (pgbouncer) doesn't
-    # support prepared statements, which asyncpg uses by default.
-    _pool = await asyncpg.create_pool(
-        config.DATABASE_URL, min_size=1, max_size=10, statement_cache_size=0
-    )
-    async with _pool.acquire() as conn:
-        await conn.execute(_SCHEMA_SQL)
-        # Added after initial deployment — CREATE TABLE IF NOT EXISTS above is a
-        # no-op on an already-existing table, so these need their own guard to
-        # reach production. Nullable: NULL means "no custom emoji captured,
-        # render the plain name/description instead" (see app.formatting.render_name).
-        await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS name_html TEXT")
-        await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS description_html TEXT")
-        # Per-product icon, settable in-chat (see products_admin.edit_icon): icon_char is
-        # always the plain emoji character (works everywhere, no Premium needed);
-        # icon_emoji_id is only set when the admin sent a Premium custom/animated emoji,
-        # and takes priority when present (see app.formatting.render_name_with_icon /
-        # app.keyboards._product_icon_btn). NULL icon_char -> fall back to the global
-        # "product" CUSTOM_EMOJI_IDS icon.
-        await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS icon_char TEXT")
-        await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS icon_emoji_id TEXT")
-        # notified: whether the buyer has been DM'd about a manual (admin-panel) credit —
-        # only meaningful for deposits.credited_tx_ref LIKE 'manual:%'; auto-matched
-        # deposits are notified inline by credit_deposit_once and never check this.
-        await conn.execute("ALTER TABLE deposits ADD COLUMN IF NOT EXISTS notified INTEGER NOT NULL DEFAULT 0")
-        # How many units an order is for — old rows default to 1 (they always
-        # were exactly 1 unit, from before quantity > 1 purchases existed).
-        await conn.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS qty INTEGER NOT NULL DEFAULT 1")
-        # Freeform admin context on a buyer (e.g. "disputed a charge once,
-        # watch for repeat"), editable from the admin panel's user detail page.
-        # Single field, overwritten on save — not a timestamped note history.
-        await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''")
-        row = await conn.fetchrow("SELECT store_mode FROM bot_settings WHERE id = 1")
-        config.STORE_MODE = row["store_mode"] if row else "auto"
+    """Open the local SQLite file (creating it and its parent dir if needed),
+    apply the schema, and load the runtime store-mode. Call once at startup from
+    inside a running event loop (e.g. python-telegram-bot's post_init)."""
+    global _conn, _lock
+    path = config.DB_PATH
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    # isolation_level=None -> autocommit; we drive BEGIN/COMMIT explicitly in
+    # _connect() so each DB block is one atomic, serialized transaction.
+    _conn = await aiosqlite.connect(path, isolation_level=None)
+    _conn.row_factory = sqlite3.Row
+    _lock = asyncio.Lock()
+
+    await _conn.execute("PRAGMA journal_mode=WAL")     # readers (view_db) don't block the bot's writes
+    await _conn.execute("PRAGMA foreign_keys=ON")      # enforce product_keys -> products, etc.
+    await _conn.execute("PRAGMA busy_timeout=5000")    # wait, don't error, on brief lock contention
+
+    await _conn.executescript(_SCHEMA_SQL)
+
+    # Columns added after the original schema shipped — guarded so an older
+    # local DB picks them up without wiping data (see _add_column_if_missing).
+    await _add_column_if_missing(_conn, "products", "name_html", "TEXT")
+    await _add_column_if_missing(_conn, "products", "description_html", "TEXT")
+    await _add_column_if_missing(_conn, "products", "icon_char", "TEXT")
+    await _add_column_if_missing(_conn, "products", "icon_emoji_id", "TEXT")
+    await _add_column_if_missing(_conn, "deposits", "notified", "INTEGER NOT NULL DEFAULT 0")
+    await _add_column_if_missing(_conn, "orders", "qty", "INTEGER NOT NULL DEFAULT 1")
+    await _add_column_if_missing(_conn, "users", "notes", "TEXT NOT NULL DEFAULT ''")
+
+    cur = await _conn.execute("SELECT store_mode FROM bot_settings WHERE id = 1")
+    try:
+        row = await cur.fetchone()
+    finally:
+        await cur.close()
+    config.STORE_MODE = row["store_mode"] if row else "auto"
 
 
 async def close_pool() -> None:
-    if _pool is not None:
-        await _pool.close()
+    global _conn
+    if _conn is not None:
+        await _conn.close()
+        _conn = None
 
 
 @asynccontextmanager
-async def _connect() -> AsyncIterator[asyncpg.Connection]:
-    async with _pool.acquire() as conn:
-        async with conn.transaction():
-            yield conn
+async def _connect() -> AsyncIterator[Connection]:
+    """Yield a connection wrapped in one serialized, all-or-nothing transaction.
+
+    A single process-wide lock guarantees no two DB blocks interleave, so the
+    read-then-write sequences the money paths depend on (stock decrement, wallet
+    debit, deposit crediting) stay atomic without Postgres row locks."""
+    if _conn is None or _lock is None:
+        raise RuntimeError("Database not initialized — call init_pool() first.")
+    async with _lock:
+        await _conn.execute("BEGIN")
+        try:
+            yield Connection(_conn)
+        except BaseException:
+            await _conn.rollback()
+            raise
+        else:
+            await _conn.commit()
 
 
 def _now() -> str:

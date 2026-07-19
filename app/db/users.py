@@ -1,6 +1,5 @@
 """Broadcast audience tracking."""
-import asyncpg
-
+from app.db import _compat as asyncpg
 from app.db.schema import _connect, _now
 
 
@@ -13,7 +12,7 @@ async def record_user(user_id: int, first_name: str = "", username: str = "") ->
                ON CONFLICT (user_id) DO UPDATE SET
                    first_name = EXCLUDED.first_name,
                    username   = EXCLUDED.username,
-                   clicks     = users.clicks + 1""",
+                   clicks     = clicks + 1""",
             user_id, first_name or "", username or "", _now(),
         )
 
@@ -48,5 +47,8 @@ async def delete_users(user_ids: list[int]) -> None:
     """Used only by app.services.crypto_watch's self-check to clean up the
     throwaway users it creates, so its self-check can be re-run without
     manual DB intervention."""
+    if not user_ids:
+        return
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(user_ids)))
     async with _connect() as conn:
-        await conn.execute("DELETE FROM users WHERE user_id = ANY($1::bigint[])", user_ids)
+        await conn.execute(f"DELETE FROM users WHERE user_id IN ({placeholders})", *user_ids)
