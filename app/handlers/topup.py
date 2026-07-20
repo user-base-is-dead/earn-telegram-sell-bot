@@ -51,7 +51,7 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     balance = _format_usdt(await db.get_wallet_balance(update.effective_user.id))
     text = (
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
         f"{cemoji('money', '💰')} <b>Your wallet</b>\n"
         f"<blockquote>Balance: <b>{esc(balance)} USDT</b></blockquote>"
     )
@@ -74,7 +74,7 @@ async def topup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     balance = _format_usdt(await db.get_wallet_balance(update.effective_user.id))
     await _send(
         update,
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
         f"{cemoji('money', '💰')} <b>Wallet top-up</b>\n"
         f"<blockquote>Balance: <b>{esc(balance)} USDT</b></blockquote>\n"
         "How much USDT would you like to add? Send a number, e.g. <code>10</code>.",
@@ -124,7 +124,7 @@ async def _create_topup(update, context, rail: str, base_micro: int, via_query=N
     context.user_data["topup_rail"] = rail
     amount_str = _format_usdt(tagged)
     kb = InlineKeyboardMarkup([[_btn("🔍 Check my payment", "search", callback_data="topup:check")]])
-    brand = f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+    brand = f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
     if rail == db.RAIL_BSC:
         text = (
             brand +
@@ -195,7 +195,7 @@ async def wallet_confirm_prompt(
         return
     context.user_data["buy_pid"] = product_id
     context.user_data["buy_qty"] = qty
-    usdt_price, _, _ = db.effective_price(p)
+    usdt_price, _ = db.effective_price(p)
     total = usdt_price * qty
     qty_note = f" ×{qty}" if qty > 1 else ""
     bal = _format_usdt(await db.get_wallet_balance(update.effective_user.id))
@@ -245,7 +245,7 @@ async def _pay_from_wallet(
     if await db.count_unused_keys(product_id) < qty:
         await _reply(f"{cemoji('warn', '⚠️')} This product doesn't have {qty} delivery codes left. Contact support.")
         return
-    usdt_price, _, _ = db.effective_price(p)
+    usdt_price, _ = db.effective_price(p)
     price_micro = int(Decimal(str(usdt_price)) * 1_000_000) * qty
     if not await db.debit_wallet(user.id, price_micro, reason="purchase", ref=str(product_id)):
         balance_micro = await db.get_wallet_balance(user.id)
@@ -253,7 +253,7 @@ async def _pay_from_wallet(
             _format_usdt(balance_micro), _format_usdt(price_micro), _format_usdt(price_micro - balance_micro)
         )
         await _reply(
-            f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+            f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
             f"{cemoji('warn', '⚠️')} <b>Insufficient wallet balance</b>\n"
             f"<blockquote>Balance: <b>{esc(bal)} USDT</b>\n"
             f"Needed: <b>{esc(need)} USDT</b>\n"
@@ -297,7 +297,7 @@ async def _pay_from_wallet(
     # persistent reply-keyboard buttons below the text box still work for
     # navigation without touching this message.
     await _reply(
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
         f"{cemoji('party', '🎉')} <b>Order {esc(_order_no(order))} confirmed!</b>\n"
         f"Here's your <b>{render_name(p)}{qty_note}</b>:\n\n{codes_block}\n\n"
         f"<blockquote>{cemoji('pray', '🙏')} Thank you for shopping with us — enjoy!</blockquote>",

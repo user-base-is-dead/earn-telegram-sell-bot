@@ -21,8 +21,7 @@ def _get_admin_ids(raw: str) -> set[int]:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = _get_admin_ids(os.getenv("ADMIN_IDS", ""))
-UPI_ID = os.getenv("UPI_ID", "").strip()
-UPI_PAYEE_NAME = os.getenv("UPI_PAYEE_NAME", "Store").strip()
+STORE_NAME = os.getenv("STORE_NAME", "Store").strip()
 
 # --- Force-join channels (optional) ---
 # Comma-separated @usernames a user must join before using the bot. Leave blank
@@ -97,7 +96,7 @@ def _get_int(raw: str, default: int) -> int:
 # Flat fee (in USDT) added on top of a product's USDT price for Binance Pay /
 # crypto payments, to cover network/transfer charges so you receive the full
 # amount. Example: product 6 USDT + fee 0.2 -> buyer sends 6.2 USDT. Set to 0
-# to disable. Does NOT affect UPI (INR) payments.
+# to disable.
 CRYPTO_FEE_USDT = _get_float(os.getenv("CRYPTO_FEE_USDT", ""), 0.2)
 
 # --- Daily ops digest ---
@@ -125,10 +124,6 @@ TELEGRAM_PROXY = os.getenv("TELEGRAM_PROXY", "").strip()
 CONNECT_TIMEOUT = _get_float(os.getenv("CONNECT_TIMEOUT", ""), 20.0)
 # How many times to retry the initial connection before giving up (default 5).
 STARTUP_RETRIES = _get_int(os.getenv("STARTUP_RETRIES", ""), 5)
-
-
-def upi_enabled() -> bool:
-    return bool(UPI_ID)
 
 
 def binance_pay_enabled() -> bool:
@@ -183,10 +178,10 @@ def validate() -> None:
             + ", ".join(missing)
             + "\nCopy .env.example to .env and fill in the values."
         )
-    if not (upi_enabled() or binance_enabled()):
+    if not binance_enabled():
         raise SystemExit(
-            "No payment method configured. Set UPI_ID and/or "
-            "BINANCE_PAY_ID / CRYPTO_ADDRESS in .env."
+            "No payment method configured. Set BINANCE_PAY_ID and/or "
+            "CRYPTO_ADDRESS in .env."
         )
     problems = _half_configured_rails()
     if problems:

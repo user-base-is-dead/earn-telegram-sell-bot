@@ -7,12 +7,11 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from app import config, db
 from app.formatting import (
-    _fmt, _format_usdt, _order_no, _pad, cemoji, esc, money, order_amount_str, price_both,
+    _fmt, _format_usdt, _order_no, _pad, cemoji, esc, order_amount_str,
     qty_suffix, render_name, usdt,
 )
 from app.keyboards import _btn, back_to_menu_kb, cancel_kb, review_keyboard
 from app.render import _edit_or_replace, _send
-from app.services import qr as qr_utils
 from app.states import BUY_QTY, PAY_UTR
 
 logger = logging.getLogger(__name__)
@@ -64,16 +63,16 @@ async def buy_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         )
         return ConversationHandler.END
 
-    usdt_price, inr_price, _ = db.effective_price(p)
+    usdt_price, _ = db.effective_price(p)
 
     # Free product -> create order immediately and show Claim. No qty prompt:
     # claiming more than one free unit isn't a real purchase to plan around.
-    if usdt_price == 0 and inr_price == 0:
+    if usdt_price == 0:
         user = update.effective_user
         order_id = await db.create_order(
             user_id=user.id, username=user.username or "",
             product_id=p["id"], product_name=p["name"],
-            amount=inr_price, amount_usdt=usdt_price,
+            amount_usdt=usdt_price,
         )
         await _edit_or_replace(
             query,
@@ -159,8 +158,8 @@ async def _offer_payment_methods(
 
     product_id = p["id"]
     user = update.effective_user
-    usdt_price, inr_price, _ = db.effective_price(p)
-    total_usdt, total_inr = usdt_price * qty, inr_price * qty
+    usdt_price, _ = db.effective_price(p)
+    total_usdt = usdt_price * qty
 
     # Build method buttons — carry product_id, order created on method selection.
     # Auto mode: wallet is the only rail ever offered. Manual mode: the reverse.
@@ -170,10 +169,6 @@ async def _offer_payment_methods(
     )
     methods = []
     if not auto:
-        if config.upi_enabled() and inr_price > 0:
-            methods.append(_btn(
-                f"💳 UPI — {money(total_inr)}", "upi", callback_data=f"pm:upi:{product_id}"
-            ))
         if config.binance_pay_enabled():
             methods.append(_btn(
                 f"💠 Binance Pay — {usdt(total_usdt)}", "binance", callback_data=f"pm:bnb:{product_id}"
@@ -200,9 +195,7 @@ async def _offer_payment_methods(
 
     # Single method -> go directly (order created there).
     if len(methods) == 1:
-        if not auto and config.upi_enabled() and inr_price > 0:
-            await _create_and_show(update, context, product_id, "upi", qty)
-        elif not auto and config.binance_pay_enabled():
+        if not auto and config.binance_pay_enabled():
             await _create_and_show(update, context, product_id, "bnb", qty)
         elif not auto and config.blockchain_enabled():
             await _create_and_show(update, context, product_id, "chain", qty)
@@ -227,7 +220,7 @@ async def _offer_payment_methods(
         update,
         _pad(
             f"{cemoji('cart', '🛍')} <b>{render_name(p)}{qty_note}</b>\n"
-            f"Amount: <b>{esc(price_both(total_usdt, total_inr))}</b>\n\n{note}"
+            f"Amount: <b>{esc(usdt(total_usdt))}</b>\n\n{note}"
             f"Choose a payment method {cemoji('point_down', '👇')}",
             InlineKeyboardMarkup(rows),
         ),
@@ -248,11 +241,11 @@ def _pop_qty_for(context: ContextTypes.DEFAULT_TYPE, product_id: int) -> int:
 
 
 async def _create_order_for(user, p, qty: int = 1) -> int:
-    usdt_price, inr_price, _ = db.effective_price(p)
+    usdt_price, _ = db.effective_price(p)
     return await db.create_order(
         user_id=user.id, username=user.username or "",
         product_id=p["id"], product_name=p["name"],
-        amount=inr_price * qty, amount_usdt=usdt_price * qty, qty=qty,
+        amount_usdt=usdt_price * qty, qty=qty,
     )
 
 
@@ -262,8 +255,8 @@ async def _create_and_show(
     p = await db.get_product(product_id)
     stock = await db.get_effective_stock(product_id, p["stock"]) if p else 0
     if not p or stock < qty:
-        # Reached from either a button tap (pay_upi/bnb/chain) or the plain
-        # text message right after a typed quantity (single-method shortcut).
+        # Reached from either a button tap (pay_binance/pay_blockchain) or the
+        # plain text message right after a typed quantity (single-method shortcut).
         if update.callback_query:
             await update.callback_query.answer("Out of stock.", show_alert=True)
         else:
@@ -273,46 +266,10 @@ async def _create_and_show(
             )
         return
     order_id = await _create_order_for(update.effective_user, p, qty)
-    if method == "upi":
-        await _show_upi_payment(update, context, order_id)
-    elif method == "bnb":
+    if method == "bnb":
         await _show_binance_pay_payment(update, context, order_id)
     else:
         await _show_blockchain_payment(update, context, order_id)
-
-
-async def _show_upi_payment(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: int
-) -> None:
-    order = await db.get_order(order_id)
-    await db.set_order_method(order_id, "UPI")
-
-    text = (
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
-        f"{cemoji('receipt', '🧾')} <b>Order {esc(_order_no(order))}</b>{esc(qty_suffix(order))}\n\n"
-        f"<b>Amount:</b> <code>₹{_fmt(order['amount'])}</code>\n"
-        f"<b>UPI ID:</b> <code>{esc(config.UPI_ID)}</code>\n"
-        f"<blockquote>Scan the QR (amount is pre-filled) or pay the UPI ID above, "
-        f"then tap <b>{cemoji('check', '✅')} I've Paid</b>.</blockquote>"
-    )
-    qr, _ = qr_utils.generate_payment_qr(order["amount"], _order_no(order))
-    query = update.callback_query
-    # Can't edit a text message into a photo message — delete the previous
-    # screen (product view / method chooser) and send the QR fresh, so
-    # nothing stacks up, matching how the BSC top-up QR screen already works.
-    # Reached from a plain text message (not a button tap) when this is the
-    # single-payment-method shortcut right after the buyer typed a quantity —
-    # there's no callback message to delete in that case, just send.
-    if query:
-        try:
-            await query.message.delete()
-        except Exception:  # noqa: BLE001
-            pass
-    chat_id = query.message.chat_id if query else update.effective_chat.id
-    await context.bot.send_photo(
-        chat_id, qr, caption=text, parse_mode=ParseMode.HTML,
-        reply_markup=await _payment_buttons(order_id),
-    )
 
 
 def _pay_text_header(order) -> list[str]:
@@ -321,7 +278,7 @@ def _pay_text_header(order) -> list[str]:
     to copy the exact number."""
     amt_usdt = order["amount_usdt"] if "amount_usdt" in order.keys() else 0.0
     lines = [
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>",
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>",
         "",
         f"{cemoji('receipt', '🧾')} <b>Order {esc(_order_no(order))}</b>{esc(qty_suffix(order))}",
         "",
@@ -333,7 +290,7 @@ def _pay_text_header(order) -> list[str]:
             line += " <i>(incl. charges)</i>"
         lines.append(line)
     else:
-        lines.append(f"<b>Amount:</b> <b>{esc(money(order['amount']))}</b>")
+        lines.append(f"<b>Amount:</b> <b>{esc(usdt(amt_usdt))}</b>")
     return lines
 
 
@@ -400,16 +357,6 @@ async def claim_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def pay_upi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if config.is_auto_mode():
-        await query.answer("This isn't available right now.", show_alert=True)
-        return
-    await query.answer()
-    product_id = int(query.data.split(":")[2])
-    await _create_and_show(update, context, product_id, "upi", _pop_qty_for(context, product_id))
-
-
 async def pay_binance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if config.is_auto_mode():
@@ -447,7 +394,7 @@ async def paid_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         chat_id=query.message.chat_id,
         text=(
             f"{cemoji('point_right', '👉')} Thanks! For <b>Order {esc(_order_no(order))}</b>, please send your "
-            "<b>UPI UTR</b> (12-digit ref) or <b>Binance TxID</b>, "
+            "<b>Binance TxID</b> / transaction hash, "
             "or a <b>screenshot</b> of the successful payment."
         ),
         parse_mode=ParseMode.HTML,

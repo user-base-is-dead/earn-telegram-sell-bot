@@ -15,7 +15,7 @@ from telegram.error import RetryAfter
 from telegram.ext import ContextTypes
 
 from app import config, db
-from app.formatting import cemoji, esc, price_both, render_name
+from app.formatting import cemoji, esc, render_name, usdt
 from app.keyboards import _btn, buy_now_btn
 from app.render import _edit_admin_msg
 
@@ -53,8 +53,7 @@ def _is_restock(old_stock, new_stock) -> bool:
 
 def _announcement_text(kind: str, product) -> str:
     name = render_name(product)
-    inr = 0.0 if config.is_auto_mode() else product["price_inr"]
-    price = esc(price_both(product["price"], inr))
+    price = esc(usdt(product["price"]))
     if kind == "new":
         return (
             f"{cemoji('new', '🆕')} <b>New in the store!</b>\n\n"
@@ -72,33 +71,29 @@ def _announcement_text(kind: str, product) -> str:
     return f"{cemoji('warn', '⚠️')} <b>Sold out</b>\n\n<b>{name}</b> is now out of stock."
 
 
-def _price_change_text(name, old_usdt, old_inr, new_usdt, new_inr, increased: bool) -> str:
+def _price_change_text(name, old_usdt, new_usdt, increased: bool) -> str:
     """Crystal-clear price-change announcement: product name + old → new price
-    (both currencies), with emojis. `name` must already be HTML-safe — pass
-    render_name(p), not a raw string."""
+    (USDT), with emojis. `name` must already be HTML-safe — pass render_name(p),
+    not a raw string."""
     arrow = cemoji('up', '🔺') if increased else cemoji('down', '🔻')
-    if config.is_auto_mode():
-        old_inr = new_inr = 0.0
     return (
         f"{cemoji('bell', '🔔')} <b>Price updated!</b> {arrow}\n\n"
         f"{cemoji('restock', '📦')} <b>{name}</b>\n\n"
-        f"{cemoji('money', '💰')} Old price: <s>{esc(price_both(old_usdt, old_inr))}</s>\n"
-        f"{cemoji('new', '🆕')} New price: <b>{esc(price_both(new_usdt, new_inr))}</b>\n\n"
+        f"{cemoji('money', '💰')} Old price: <s>{esc(usdt(old_usdt))}</s>\n"
+        f"{cemoji('new', '🆕')} New price: <b>{esc(usdt(new_usdt))}</b>\n\n"
         f"{cemoji('cart', '🛍')} Tap Browse products to check it out!"
     )
 
 
-def _sale_text(name: str, old_usdt, old_inr, offer_usdt, offer_inr, duration_label: str) -> str:
+def _sale_text(name: str, old_usdt, offer_usdt, duration_label: str) -> str:
     """Flash-sale announcement: struck-through old price -> discounted price,
     with the human-readable duration (e.g. '24h', '3d'). `name` must already
     be HTML-safe — pass render_name(p), not a raw string."""
-    if config.is_auto_mode():
-        old_inr = offer_inr = 0.0
     return (
         f"{cemoji('sale', '🔥')} <b>Flash Sale!</b> {cemoji('sale', '🔥')}\n\n"
         f"<b>{name}</b>\n"
-        f"{cemoji('money', '💰')} Was: <s>{esc(price_both(old_usdt, old_inr))}</s>\n"
-        f"{cemoji('new', '🎉')} Now: <b>{esc(price_both(offer_usdt, offer_inr))}</b>\n\n"
+        f"{cemoji('money', '💰')} Was: <s>{esc(usdt(old_usdt))}</s>\n"
+        f"{cemoji('new', '🎉')} Now: <b>{esc(usdt(offer_usdt))}</b>\n\n"
         f"{cemoji('bell', '⏰')} Ends in <b>{esc(duration_label)}</b> — grab it before it's gone!\n\n"
         f"{cemoji('cart', '🛍')} Tap Browse products to buy now."
     )

@@ -25,7 +25,7 @@ async def check_user_membership(bot, user_id: int) -> bool:
 async def send_force_join_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Render the welcome screen prompting the user to join the channels."""
     text = (
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
         f"{cemoji('announce', '📢')} <b>One quick step</b>\n"
         "<i>Join our channel to unlock the store</i>\n"
         "<blockquote>Join below, then tap <b>I've Joined</b> — takes 5 seconds.</blockquote>"
@@ -59,7 +59,7 @@ async def force_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if await check_user_membership(context.bot, user.id):
             await update.callback_query.answer()
             success_text = (
-                f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+                f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
                 f"{cemoji('check', '✅')} <b>Verified! Welcome aboard</b> {cemoji('party', '🎉')}"
             )
             await _edit_or_replace(update.callback_query, success_text)  # 1st message: join-gate -> success

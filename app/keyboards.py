@@ -194,7 +194,7 @@ def _catalog_label(p, stock: int) -> str:
     else:
         icon_char = (p["icon_char"] if "icon_char" in p.keys() else None) or "🏷"
     name = truncate_safe((p["name"] or "").strip(), CATALOG_PRICED_NAME_MAX)
-    usdt_price, _, _ = db.effective_price(p)
+    usdt_price, _ = db.effective_price(p)
     return f"{icon_char} {name} | {usdt(usdt_price)} | {_stock_badge(stock)}"
 
 
@@ -334,13 +334,13 @@ def manage_keyboard(p) -> InlineKeyboardMarkup:
     toggle_text = "❌ Deactivate" if p["active"] else "✅ Activate"
     toggle_key = "deactivate" if p["active"] else "activate"
     pid = p["id"]
-    _, _, is_discounted = db.effective_price(p)
+    _, is_discounted = db.effective_price(p)
     discount_btn = (
         _btn("❌ End discount", "cancel", callback_data=f"enddiscount:{pid}") if is_discounted
         else _btn("🏷️ Discount", "sale", callback_data=f"discount:{pid}")
     )
     rows = [
-        [_btn("💰 Price (USDT + INR)", "price", callback_data=f"edit:price_both:{pid}")],
+        [_btn("💰 Price (USDT)", "price", callback_data=f"edit:price:{pid}")],
         [
             _btn("📦 Stock", "stock", callback_data=f"edit:stock:{pid}"),
             _btn("🔤 Name", "name", callback_data=f"edit:name:{pid}"),

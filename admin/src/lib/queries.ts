@@ -16,7 +16,7 @@ function last7Days(): string[] {
  */
 function dailySeries(
   rows: { created_at: string }[],
-  valueOf: (row: { created_at: string; amount?: number | null; amount_usdt?: number | null }) => number
+  valueOf: (row: { created_at: string; amount_usdt?: number | null }) => number
 ): number[] {
   const byDay = new Map<string, number>();
   for (const row of rows) {
@@ -43,7 +43,7 @@ export async function getDashboardStats() {
   ] = await Promise.all([
     db
       .from("orders")
-      .select("created_at, amount, amount_usdt, status, product_name")
+      .select("created_at, amount_usdt, status, product_name")
       .gte("created_at", since7d),
     db.from("products").select("id, name, stock").eq("active", 1),
     db.from("orders").select("id", { count: "exact", head: true }).eq("status", "pending_review"),
@@ -85,10 +85,8 @@ export async function getDashboardStats() {
     .filter((p) => p.stock >= 0 && p.stock <= 5);
 
   const approved = (recentOrders ?? []).filter((o) => o.status === "approved");
-  const revenueInr = approved.reduce((sum, o) => sum + Number(o.amount ?? 0), 0);
   const revenueUsdt = approved.reduce((sum, o) => sum + Number(o.amount_usdt ?? 0), 0);
 
-  const revenueInrTrend = dailySeries(approved, (o) => Number(o.amount ?? 0));
   const revenueUsdtTrend = dailySeries(approved, (o) => Number(o.amount_usdt ?? 0));
   const orderCountTrend = dailySeries(approved, () => 1);
 
@@ -96,20 +94,17 @@ export async function getDashboardStats() {
 
   // last7Days()/dailySeries() both end on today, so the trend's last entry is today's figure —
   // no separate "today" query needed for sales.
-  const todayIndex = revenueInrTrend.length - 1;
+  const todayIndex = revenueUsdtTrend.length - 1;
 
   return {
-    revenueInr,
     revenueUsdt,
     orderCount7d: approved.length,
     pendingCount: pendingCount ?? 0,
     lowStock,
     trend,
-    revenueInrTrend,
     revenueUsdtTrend,
     orderCountTrend,
     topProducts: topProductsByRevenue(approved),
-    salesTodayInr: revenueInrTrend[todayIndex],
     salesTodayUsdt: revenueUsdtTrend[todayIndex],
     ordersToday: orderCountTrend[todayIndex],
     depositsPendingMicro,
@@ -140,7 +135,7 @@ export async function getRecentOrders(limit: number) {
   const db = supabaseServer();
   const { data } = await db
     .from("orders")
-    .select("id, ref, product_name, username, user_id, method, status, amount, amount_usdt, created_at")
+    .select("id, ref, product_name, username, user_id, method, status, amount_usdt, created_at")
     .order("id", { ascending: false })
     .limit(limit);
   return data ?? [];

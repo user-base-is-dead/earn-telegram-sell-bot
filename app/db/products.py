@@ -11,7 +11,6 @@ async def add_product(
     price: float,
     content: str,
     stock: int = UNLIMITED_STOCK,
-    price_inr: float = 0.0,
     name_html: Optional[str] = None,
     description_html: Optional[str] = None,
     icon_char: Optional[str] = None,
@@ -20,10 +19,10 @@ async def add_product(
     async with _connect() as conn:
         return await conn.fetchval(
             """INSERT INTO products
-               (name, description, price, price_inr, content, stock, active, created_at,
+               (name, description, price, content, stock, active, created_at,
                 name_html, description_html, icon_char, icon_emoji_id)
-               VALUES ($1, $2, $3, $4, $5, $6, 1, $7, $8, $9, $10, $11) RETURNING id""",
-            name, description, price, price_inr, content, stock, _now(),
+               VALUES ($1, $2, $3, $4, $5, 1, $6, $7, $8, $9, $10) RETURNING id""",
+            name, description, price, content, stock, _now(),
             name_html, description_html, icon_char, icon_emoji_id,
         )
 
@@ -65,7 +64,7 @@ async def set_product_active(product_id: int, active: bool) -> None:
 
 # Only these product fields may be edited from chat (whitelist guards the SQL).
 EDITABLE_FIELDS = {
-    "name", "description", "price", "price_inr", "stock",
+    "name", "description", "price", "stock",
     "name_html", "description_html", "icon_char", "icon_emoji_id",
 }
 
@@ -190,32 +189,33 @@ async def get_effective_stock(product_id: int, manual_stock: int) -> int:
     return effective_stock(manual_stock, await get_key_pool_count(product_id))
 
 
-async def set_product_offer(product_id: int, offer_price: float, offer_price_inr: float, offer_until: str) -> None:
+async def set_product_offer(product_id: int, offer_price: float, offer_until: str) -> None:
     async with _connect() as conn:
         await conn.execute(
-            "UPDATE products SET offer_price = $1, offer_price_inr = $2, offer_until = $3 WHERE id = $4",
-            offer_price, offer_price_inr, offer_until, product_id,
+            "UPDATE products SET offer_price = $1, offer_until = $2 WHERE id = $3",
+            offer_price, offer_until, product_id,
         )
 
 
 async def clear_offer(product_id: int) -> None:
     async with _connect() as conn:
         await conn.execute(
-            "UPDATE products SET offer_price = 0, offer_price_inr = 0, offer_until = '' WHERE id = $1",
+            "UPDATE products SET offer_price = 0, offer_until = '' WHERE id = $1",
             product_id,
         )
 
 
-def effective_price(p) -> tuple[float, float, bool]:
-    """A product's real charge/display price: its discount price while
-    offer_until is set and still in the future, else its normal price.
-    Pure (no DB call) so callers can use it on a Record they already have,
-    the same shape as effective_stock(). ISO-8601 UTC strings compare
-    correctly lexicographically (see app.db.wallet's expires_at checks)."""
+def effective_price(p) -> tuple[float, bool]:
+    """A product's real charge/display price in USDT: its discount price while
+    offer_until is set and still in the future, else its normal price. Returns
+    (usdt_price, is_discounted). Pure (no DB call) so callers can use it on a
+    Record they already have, the same shape as effective_stock(). ISO-8601 UTC
+    strings compare correctly lexicographically (see app.db.wallet's expires_at
+    checks)."""
     offer_until = p["offer_until"] if "offer_until" in p.keys() else ""
     if offer_until and offer_until > _now():
-        return float(p["offer_price"]), float(p["offer_price_inr"]), True
-    return float(p["price"]), float(p["price_inr"]), False
+        return float(p["offer_price"]), True
+    return float(p["price"]), False
 
 
 async def clear_expired_offers() -> list[asyncpg.Record]:
@@ -223,7 +223,7 @@ async def clear_expired_offers() -> list[asyncpg.Record]:
     rows that were cleared, for the caller to log/inspect."""
     async with _connect() as conn:
         return await conn.fetch(
-            """UPDATE products SET offer_price = 0, offer_price_inr = 0, offer_until = ''
+            """UPDATE products SET offer_price = 0, offer_until = ''
                WHERE offer_until != '' AND offer_until <= $1
                RETURNING *""",
             _now(),
@@ -425,27 +425,27 @@ async def _demo_effective_price() -> None:
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
 
-        active_pid = await add_product("selftest-offer-active", "", 10.0, "content", price_inr=900.0)
-        await set_product_offer(active_pid, 5.0, 450.0, future)
+        active_pid = await add_product("selftest-offer-active", "", 10.0, "content")
+        await set_product_offer(active_pid, 5.0, future)
         p = await get_product(active_pid)
-        usdt_p, inr_p, discounted = effective_price(p)
-        assert (usdt_p, inr_p, discounted) == (5.0, 450.0, True), (
-            f"expected discounted price while offer_until is future, got {(usdt_p, inr_p, discounted)}"
+        usdt_p, discounted = effective_price(p)
+        assert (usdt_p, discounted) == (5.0, True), (
+            f"expected discounted price while offer_until is future, got {(usdt_p, discounted)}"
         )
 
-        expired_pid = await add_product("selftest-offer-expired", "", 10.0, "content", price_inr=900.0)
-        await set_product_offer(expired_pid, 5.0, 450.0, past)
+        expired_pid = await add_product("selftest-offer-expired", "", 10.0, "content")
+        await set_product_offer(expired_pid, 5.0, past)
         p = await get_product(expired_pid)
-        usdt_p, inr_p, discounted = effective_price(p)
-        assert (usdt_p, inr_p, discounted) == (10.0, 900.0, False), (
-            f"expected normal price once offer_until is past, got {(usdt_p, inr_p, discounted)}"
+        usdt_p, discounted = effective_price(p)
+        assert (usdt_p, discounted) == (10.0, False), (
+            f"expected normal price once offer_until is past, got {(usdt_p, discounted)}"
         )
 
-        no_offer_pid = await add_product("selftest-offer-none", "", 10.0, "content", price_inr=900.0)
+        no_offer_pid = await add_product("selftest-offer-none", "", 10.0, "content")
         p = await get_product(no_offer_pid)
-        usdt_p, inr_p, discounted = effective_price(p)
-        assert (usdt_p, inr_p, discounted) == (10.0, 900.0, False), (
-            f"expected normal price with no offer set, got {(usdt_p, inr_p, discounted)}"
+        usdt_p, discounted = effective_price(p)
+        assert (usdt_p, discounted) == (10.0, False), (
+            f"expected normal price with no offer set, got {(usdt_p, discounted)}"
         )
 
         cleared = await clear_expired_offers()

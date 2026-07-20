@@ -5,7 +5,7 @@ from telegram import InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app import config, db
-from app.formatting import IST, _format_usdt, _order_no, cemoji, esc, money, order_amount_str, qty_suffix, usdt
+from app.formatting import IST, _format_usdt, _order_no, cemoji, esc, order_amount_str, qty_suffix, usdt
 from app.keyboards import _btn, refresh_menu_kb
 from app.render import _render, _send
 
@@ -260,6 +260,6 @@ async def show_earnings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     text = (
         f"{cemoji('chart', '📈')} <b>Earnings</b>\n\n"
         f"Approved orders: <b>{s['count']}</b>\n"
-        f"Total: <b>{esc(money(s['inr']))} / {esc(usdt(s['usdt']))}</b>"
+        f"Total: <b>{esc(usdt(s['usdt']))}</b>"
     )
     await _render(update, text, refresh_menu_kb("menu:earnings"))

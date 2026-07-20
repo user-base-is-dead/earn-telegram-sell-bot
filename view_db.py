@@ -61,9 +61,9 @@ async def main() -> None:
 
         _print_block("PRODUCTS [price=USDT]", products, ["id", "name", "price", "stock", "active"])
         _print_block(
-            f"ORDERS [amount=INR]{f' [{status_filter}]' if status_filter else ''}",
+            f"ORDERS [amount=USDT]{f' [{status_filter}]' if status_filter else ''}",
             orders,
-            ["id", "product_name", "amount", "amount_usdt", "status", "utr", "user_id", "created_at"],
+            ["id", "product_name", "amount_usdt", "status", "utr", "user_id", "created_at"],
         )
 
         if "--json" in sys.argv:

@@ -19,7 +19,7 @@ async def _gen_ref(conn: asyncpg.Connection) -> str:
 
 
 async def create_order(
-    user_id: int, username: str, product_id: int, product_name: str, amount: float,
+    user_id: int, username: str, product_id: int, product_name: str,
     amount_usdt: float = 0.0, qty: int = 1,
 ) -> int:
     now = _now()
@@ -29,7 +29,7 @@ async def create_order(
             """INSERT INTO orders
                (user_id, username, product_id, product_name, amount, amount_usdt, qty, status, ref, created_at, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id""",
-            user_id, username, product_id, product_name, amount, amount_usdt, qty,
+            user_id, username, product_id, product_name, 0.0, amount_usdt, qty,
             STATUS_CREATED, ref, now, now,
         )
 
@@ -193,12 +193,11 @@ async def earnings_summary() -> dict:
     """Totals across all approved (delivered) orders."""
     async with _connect() as conn:
         row = await conn.fetchrow(
-            """SELECT COALESCE(SUM(amount), 0) AS inr, COALESCE(SUM(amount_usdt), 0) AS usdt,
-                      COUNT(*) AS n
+            """SELECT COALESCE(SUM(amount_usdt), 0) AS usdt, COUNT(*) AS n
                FROM orders WHERE status = $1""",
             STATUS_APPROVED,
         )
-        return {"inr": row["inr"], "usdt": row["usdt"], "count": row["n"]}
+        return {"usdt": row["usdt"], "count": row["n"]}
 
 
 async def today_summary() -> dict:
@@ -209,10 +208,9 @@ async def today_summary() -> dict:
     ).isoformat(timespec="seconds")
     async with _connect() as conn:
         row = await conn.fetchrow(
-            """SELECT COALESCE(SUM(amount), 0) AS inr, COALESCE(SUM(amount_usdt), 0) AS usdt,
-                      COUNT(*) AS n
+            """SELECT COALESCE(SUM(amount_usdt), 0) AS usdt, COUNT(*) AS n
                FROM orders
                WHERE status = $1 AND created_at >= $2""",
             STATUS_APPROVED, today_start,
         )
-        return {"inr": row["inr"], "usdt": row["usdt"], "count": row["n"]}
+        return {"usdt": row["usdt"], "count": row["n"]}

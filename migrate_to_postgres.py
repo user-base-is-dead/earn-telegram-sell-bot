@@ -35,8 +35,8 @@ async def main(sqlite_path: str) -> None:
 
     # FK-safe order: products before orders/product_keys.
     plan = [
-        ("products", ["id", "name", "description", "price", "price_inr", "content", "stock",
-                       "active", "created_at", "offer_price", "offer_price_inr", "offer_until"]),
+        ("products", ["id", "name", "description", "price", "content", "stock",
+                       "active", "created_at", "offer_price", "offer_until"]),
         ("users", ["user_id", "first_name", "username", "started_at", "clicks", "wallet_balance_micro"]),
         ("orders", ["id", "user_id", "username", "product_id", "product_name", "amount",
                      "amount_usdt", "status", "utr", "method", "ref", "reason",

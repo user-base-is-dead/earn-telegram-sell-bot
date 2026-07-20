@@ -54,7 +54,7 @@ export function ProductCard({
         <div>
           <p className="font-medium text-[var(--ink)]">{product.name}</p>
           <p className="text-sm text-[var(--ink-muted)]">
-            ₹{product.price_inr} · ${product.price} · stock{" "}
+            ${product.price} · stock{" "}
             {effectiveStock === -1 ? "∞" : effectiveStock}
           </p>
         </div>

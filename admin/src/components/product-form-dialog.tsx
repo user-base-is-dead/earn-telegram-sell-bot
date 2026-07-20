@@ -23,7 +23,6 @@ export function ProductFormDialog({
     name: product?.name ?? "",
     description: product?.description ?? "",
     price: product?.price ?? 0,
-    price_inr: product?.price_inr ?? 0,
     content: product?.content ?? "",
     stock: product?.stock ?? 0,
   });
@@ -50,15 +49,6 @@ export function ProductFormDialog({
               rows={3}
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="price_inr">Price (INR)</Label>
-            <Input
-              id="price_inr"
-              type="number"
-              value={form.price_inr}
-              onChange={(e) => setForm({ ...form, price_inr: Number(e.target.value) })}
             />
           </div>
           <div className="flex flex-col gap-1.5">

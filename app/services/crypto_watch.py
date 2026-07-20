@@ -80,9 +80,8 @@ async def _alert_admins_stall(context, blocks_behind: int, cursor: int, safe_hea
 async def send_daily_digest(context) -> None:
     """PTB job: once a day, DM every admin a one-message summary of today's
     sales/deposits and what's still waiting on them. Plain f-string formatting
-    (not app.formatting.money()/usdt()) because those helpers render 0 as ""
-    / "Free" for buyer-facing prices — a digest needs to show "₹0" on a slow
-    day, not a blank field."""
+    (not app.formatting.usdt()) because that helper renders 0 as "Free" for
+    buyer-facing prices — a digest needs to show "$0" on a slow day, not that."""
     orders_today = await db.today_summary()
     deposits_today = await db.today_deposit_summary()
     deposits_pending = await db.pending_deposit_summary()
@@ -91,7 +90,7 @@ async def send_daily_digest(context) -> None:
     today = time.strftime("%Y-%m-%d", time.gmtime())
     text = (
         f"{cemoji('chart', '📊')} Daily summary — {today}\n\n"
-        f"Sales: ₹{orders_today['inr']:,.0f} · ${orders_today['usdt']:.2f} USDT "
+        f"Sales: ${orders_today['usdt']:.2f} USDT "
         f"({orders_today['count']} order{'s' if orders_today['count'] != 1 else ''})\n"
         f"Deposits credited: ${deposits_today['micro'] / 1_000_000:.2f} USDT "
         f"({deposits_today['count']})\n\n"

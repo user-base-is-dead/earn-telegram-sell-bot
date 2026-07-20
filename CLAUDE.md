@@ -5,9 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A single-user-style Telegram bot (python-telegram-bot v21, long-polling) that sells digital
-products: browse catalog → pay via UPI QR, Binance Pay/crypto (manual), or an internal wallet
+products: browse catalog → pay via Binance Pay/crypto (manual) or an internal wallet
 (auto-confirmed BSC/USDT-BEP20 top-ups and best-effort Binance Pay top-ups) → wallet purchases
-auto-deliver a unique code instantly; manual-payment orders still go through buyer-submits-UTR →
+auto-deliver a unique code instantly; manual-payment orders still go through buyer-submits-TxID →
 admin approves/rejects in-chat → content delivered, stock decremented.
 
 ## Commands
@@ -16,7 +16,7 @@ admin approves/rejects in-chat → content delivered, stock decremented.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env      # then fill in BOT_TOKEN, ADMIN_IDS, UPI_ID, etc.
+copy .env.example .env      # then fill in BOT_TOKEN, ADMIN_IDS, STORE_NAME, etc.
 python bot.py                # run the bot (polling) — thin shim into app.main.main()
 python view_db.py            # human-readable dump of products & orders
 python view_db.py --json     # also writes data/export.json
@@ -62,7 +62,7 @@ import `app.config`/`app.db` directly.
   from `payments.py`) is normal; watch for genuine cycles (two modules needing each other) and
   break them by moving the shared piece to a lower-level module (this is why `_edit_admin_msg`/
   `_mark_notification` live in `render.py`, not in whichever handler used them first).
-- **app/services/** — `qr.py` (UPI/crypto QR PNGs) and `crypto_watch.py` (the BSC `eth_getLogs`
+- **app/services/** — `qr.py` (crypto address QR PNGs) and `crypto_watch.py` (the BSC `eth_getLogs`
   poller + best-effort Binance Pay personal-API poller that auto-credit wallet top-ups; also
   backs the "check my payment" self-serve tx lookup). Run standalone
   (`python -m app.services.crypto_watch`) to self-check the matching/idempotency logic against a
@@ -90,15 +90,15 @@ fallbacks — later non-conversation handlers only fire when no conversation cla
 ### Callback data conventions
 
 Inline button `callback_data` follows short colon-separated prefixes matched by regex, e.g.
-`menu:home`, `catalog:<page>`, `view:<id>`, `buy:<id>`, `pm:upi:<id>`, `pm:wallet:<id>`,
+`menu:home`, `catalog:<page>`, `view:<id>`, `buy:<id>`, `pm:wallet:<id>`,
 `paid:<id>`, `approve:<id>`, `reject:<id>`, `edit:<field>:<id>`, `manage:<id>`, `toggle:<id>`,
 `keys:<id>`, `topup:rail:<rail>`, `topup:check`, `ann:ok:<id>`. Follow this scheme
 (`action:subaction:id`) for any new button rather than inventing a new format.
 
 ### Money/rendering helpers
 
-Products carry **both** a USDT price and an INR price, set manually per product (no live FX
-conversion) — see `price_both()`/`usdt()`/`money()` in `app/formatting.py`. `_pad`/`WIDTH_PAD` is
+Products carry a single USDT price, set manually per product — see `usdt()` in
+`app/formatting.py`. `_pad`/`WIDTH_PAD` is
 a Braille-character hack to force a minimum button-menu width in Telegram (no native width
 control). Wallet amounts are stored/matched as **integer micro-USDT** (`amount * 1_000_000`),
 never floats — see `app/formatting._format_usdt` and `app/db/wallet.py`.

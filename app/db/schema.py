@@ -47,7 +47,7 @@ RAIL_BSC = "bsc"
 RAIL_BINANCE_PAY = "binance_pay"
 
 STORE_MODE_AUTO = "auto"        # wallet-only, instant delivery, zero admin involvement
-STORE_MODE_MANUAL = "manual"    # UPI/Binance Pay/Crypto, admin reviews + delivers
+STORE_MODE_MANUAL = "manual"    # Binance Pay/Crypto, admin reviews + delivers
 
 # Public order reference: date + random code (e.g. 260618-K7P2). Unambiguous
 # alphabet (no 0/O/1/I/L) so it never collides with or resembles an old ID.
@@ -132,13 +132,11 @@ CREATE TABLE IF NOT EXISTS products (
     name            TEXT NOT NULL,
     description     TEXT NOT NULL DEFAULT '',
     price           REAL NOT NULL,
-    price_inr       REAL NOT NULL DEFAULT 0,
     content         TEXT NOT NULL DEFAULT '',
     stock           INTEGER NOT NULL DEFAULT -1,
     active          INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
     offer_price     REAL NOT NULL DEFAULT 0,
-    offer_price_inr REAL NOT NULL DEFAULT 0,
     offer_until     TEXT NOT NULL DEFAULT '',
     name_html       TEXT,
     description_html TEXT,
@@ -152,7 +150,7 @@ CREATE TABLE IF NOT EXISTS orders (
     username      TEXT NOT NULL DEFAULT '',
     product_id    INTEGER NOT NULL REFERENCES products(id),
     product_name  TEXT NOT NULL,
-    amount        REAL NOT NULL,
+    amount        REAL NOT NULL DEFAULT 0,
     amount_usdt   REAL NOT NULL DEFAULT 0,
     qty           INTEGER NOT NULL DEFAULT 1,
     status        TEXT NOT NULL,

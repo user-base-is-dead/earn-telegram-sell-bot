@@ -89,7 +89,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, for
     user = update.effective_user
     await _ensure_admin_commands(context, user.id)
     text = (
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b> {cemoji('star', '🌟')}\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b> {cemoji('star', '🌟')}\n"
         "<i>Premium digital goods, delivered instantly.</i>\n\n"
         f"{cemoji('wave', '👋')} Welcome, <b>{esc(user.first_name)}</b>!\n\n"
         "<blockquote>"
@@ -135,7 +135,7 @@ _MODE_INFO = {
     ),
     db.STORE_MODE_MANUAL: (
         "MANUAL",
-        "Buyers pay via UPI / Binance Pay / Crypto and you review + deliver each order.",
+        "Buyers pay via Binance Pay / Crypto and you review + deliver each order.",
     ),
 }
 
@@ -183,18 +183,16 @@ async def mode_set(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     auto = config.is_auto_mode()
     # Only advertise the payment methods actually enabled in config — never
-    # hardcode "UPI / Binance Pay / Crypto", or a buyer is told about options
-    # they can't use (e.g. Binance Pay while only a crypto address is set).
+    # hardcode "Binance Pay / Crypto", or a buyer is told about options they
+    # can't use (e.g. Binance Pay while only a crypto address is set).
     _enabled = []
-    if config.upi_enabled():
-        _enabled.append("UPI")
     if config.binance_pay_enabled():
         _enabled.append("Binance Pay")
     if config.blockchain_enabled():
         _enabled.append("Crypto")
     pay_methods = " / ".join(_enabled) or "Crypto"
     lines = [
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n",
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n",
         f"{cemoji('info', 'ℹ️')} <b>How to buy</b>",
     ]
     if auto:

@@ -22,9 +22,9 @@ from app.handlers import announcements, approvals, broadcast, catalog, clean, me
 from app.keyboards import BTN_ADD, BTN_BROADCAST, BTN_TOPUP, NAV_FILTER, NAV_NAV
 from app.services import crypto_watch
 from app.states import (
-    ADD_DESC, ADD_ICON, ADD_NAME, ADD_PRICE, ADD_PRICE_INR, ADD_STOCK, APPROVE_DELIVER,
+    ADD_DESC, ADD_ICON, ADD_NAME, ADD_PRICE, ADD_STOCK, APPROVE_DELIVER,
     BC_COMPOSE, BC_PRODUCT, BC_REVIEW, BUY_QTY, CLEAN_CONFIRM, DISCOUNT_DURATION,
-    DISCOUNT_PRICE, DISCOUNT_PRICE_INR, EDIT_PRICE_INR, EDIT_VALUE, KEYS_INPUT,
+    DISCOUNT_PRICE, EDIT_VALUE, KEYS_INPUT,
     PAY_UTR, REJECT_REASON, TOPUP_AMOUNT, TOPUP_CHECK,
 )
 
@@ -204,11 +204,6 @@ def build_application() -> Application:
                 CallbackQueryHandler(products_admin.add_back, pattern=r"^apb$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.add_price),
             ],
-            ADD_PRICE_INR: [
-                CommandHandler("back", products_admin.add_back),
-                CallbackQueryHandler(products_admin.add_back, pattern=r"^apb$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.add_price_inr),
-            ],
             ADD_STOCK: [
                 CommandHandler("back", products_admin.add_back),
                 CallbackQueryHandler(products_admin.add_back, pattern=r"^apb$"),
@@ -242,7 +237,6 @@ def build_application() -> Application:
         entry_points=[CallbackQueryHandler(products_admin.edit_start, pattern=r"^edit:[a-z_]+:\d+$")],
         states={
             EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.edit_value)],
-            EDIT_PRICE_INR: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.edit_price_inr_value)],
         },
         fallbacks=common_fallbacks,
         allow_reentry=True,
@@ -280,7 +274,6 @@ def build_application() -> Application:
         entry_points=[CallbackQueryHandler(products_admin.discount_start, pattern=r"^discount:\d+$")],
         states={
             DISCOUNT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.discount_price)],
-            DISCOUNT_PRICE_INR: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.discount_price_inr)],
             DISCOUNT_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~NAV_FILTER, products_admin.discount_duration)],
         },
         fallbacks=common_fallbacks,
@@ -414,7 +407,6 @@ def build_application() -> Application:
     # here — it needs to prompt for a quantity before either continuing or ending)
     app.add_handler(CallbackQueryHandler(catalog.show_catalog, pattern=r"^catalog(:\d+)?$"))
     app.add_handler(CallbackQueryHandler(catalog.view_product, pattern=r"^view:\d+$"))
-    app.add_handler(CallbackQueryHandler(payments.pay_upi, pattern=r"^pm:upi:\d+$"))
     app.add_handler(CallbackQueryHandler(payments.pay_binance, pattern=r"^pm:bnb:\d+$"))
     app.add_handler(CallbackQueryHandler(payments.pay_blockchain, pattern=r"^pm:chain:\d+$"))
     app.add_handler(CallbackQueryHandler(topup.pay_wallet, pattern=r"^pm:wallet:\d+$"))

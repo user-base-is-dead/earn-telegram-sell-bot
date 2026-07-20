@@ -46,7 +46,7 @@ export function OrderRow({ order, actionable }: { order: any; actionable: boolea
       </TableCell>
       <TableCell className="text-[var(--ink-muted)]">{order.method}</TableCell>
       <TableCell className="text-[var(--ink-muted)]">
-        {order.amount_usdt ? `$${order.amount_usdt}` : `₹${order.amount}`}
+        {order.amount_usdt ? `$${order.amount_usdt}` : "Free"}
       </TableCell>
       <TableCell>
         {!actionable && order.status !== "created" && (

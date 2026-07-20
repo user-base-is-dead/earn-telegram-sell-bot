@@ -138,7 +138,7 @@ async def _finalize_approve(
 
     buyer = order["user_id"]
     header = (
-        f"{cemoji('star', '🌟')} <b>{esc(config.UPI_PAYEE_NAME)}</b>\n\n"
+        f"{cemoji('star', '🌟')} <b>{esc(config.STORE_NAME)}</b>\n\n"
         f"{cemoji('party', '🎉')} <b>Order {esc(_order_no(order))} confirmed!</b>\n"
         f"Here's your <b>{esc(order['product_name'])}{qty_suffix(order)}</b>:"
     )

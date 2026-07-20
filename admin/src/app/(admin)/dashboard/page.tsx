@@ -41,7 +41,7 @@ export default async function DashboardPage() {
         <KpiRow>
           <KpiCard
             label="Sales today"
-            value={`₹${stats.salesTodayInr.toFixed(0)} · $${stats.salesTodayUsdt.toFixed(2)}`}
+            value={`$${stats.salesTodayUsdt.toFixed(2)}`}
             sublabel={`${stats.ordersToday} order(s)`}
             icon={<DollarSign className="size-5 text-white" />}
             accent="gold"
@@ -74,14 +74,7 @@ export default async function DashboardPage() {
         <h2 className="mb-3 text-sm font-medium text-[var(--ink-muted)]">Last 7 days</h2>
         <KpiRow>
           <KpiCard
-            label="Revenue (7d, INR)"
-            value={`₹${stats.revenueInr.toFixed(0)}`}
-            icon={<DollarSign className="size-5 text-white" />}
-            accent="gold"
-            sparkline={stats.revenueInrTrend}
-          />
-          <KpiCard
-            label="Revenue (7d, USDT)"
+            label="Revenue (7d)"
             value={`$${stats.revenueUsdt.toFixed(2)}`}
             icon={<Wallet className="size-5 text-white" />}
             accent="violet"
@@ -149,7 +142,7 @@ export default async function DashboardPage() {
                   </TableCell>
                   <TableCell className="text-[var(--ink-muted)]">{order.method}</TableCell>
                   <TableCell className="text-[var(--ink-muted)]">
-                    {order.amount_usdt ? `$${order.amount_usdt}` : `₹${order.amount}`}
+                    {order.amount_usdt ? `$${order.amount_usdt}` : "Free"}
                   </TableCell>
                   <TableCell>
                     <Badge className={STATUS_COLOR[order.status]}>{order.status}</Badge>

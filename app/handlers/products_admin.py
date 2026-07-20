@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 from app import config, db
 from app.formatting import (
-    IST, cemoji, esc, money, price_both, render_desc, render_name, render_name_with_icon, truncate_safe, usdt,
+    IST, cemoji, esc, render_desc, render_name, render_name_with_icon, truncate_safe, usdt,
 )
 from app.handlers.announcements import (
     _announcement_text, _broadcast, _is_restock, _offer_announcement, _price_change_text, _sale_text,
@@ -20,33 +20,29 @@ from app.keyboards import (
 )
 from app.render import _edit_or_replace, _render, _send
 from app.states import (
-    ADD_DESC, ADD_ICON, ADD_NAME, ADD_PRICE, ADD_PRICE_INR, ADD_STOCK, DISCOUNT_DURATION,
-    DISCOUNT_PRICE, DISCOUNT_PRICE_INR, EDIT_PRICE_INR, EDIT_VALUE, KEYS_INPUT, WIZARD_ORDER,
+    ADD_DESC, ADD_ICON, ADD_NAME, ADD_PRICE, ADD_STOCK, DISCOUNT_DURATION,
+    DISCOUNT_PRICE, EDIT_VALUE, KEYS_INPUT, WIZARD_ORDER,
 )
 
 WIZARD_PROMPTS = {
     ADD_NAME: (
-        f"{cemoji('name', '🏷️')} <b>Step 1/6 — Name</b>\n"
+        f"{cemoji('name', '🏷️')} <b>Step 1/5 — Name</b>\n"
         "What should this product be called?"
     ),
     ADD_DESC: (
-        f"{cemoji('pencil', '📝')} <b>Step 2/6 — Description</b>\n"
+        f"{cemoji('pencil', '📝')} <b>Step 2/5 — Description</b>\n"
         "Send a short, punchy description — or <code>-</code> to skip."
     ),
     ADD_PRICE: (
-        f"{cemoji('money', '💵')} <b>Step 3/6 — Price (USDT)</b>\n"
+        f"{cemoji('money', '💵')} <b>Step 3/5 — Price (USDT)</b>\n"
         "Send the price in USDT, e.g. <code>9.99</code>."
     ),
-    ADD_PRICE_INR: (
-        f"{cemoji('money', '💰')} <b>Step 4/6 — Price (INR)</b>\n"
-        "Send the price in ₹, e.g. <code>799</code>."
-    ),
     ADD_STOCK: (
-        f"{cemoji('restock', '📦')} <b>Step 5/6 — Stock</b>\n"
+        f"{cemoji('restock', '📦')} <b>Step 4/5 — Stock</b>\n"
         "Send the stock count, or <code>unlimited</code>."
     ),
     ADD_ICON: (
-        f"{cemoji('name', '🏷️')} <b>Step 6/6 — Icon</b>\n"
+        f"{cemoji('name', '🏷️')} <b>Step 5/5 — Icon</b>\n"
         "Send a single emoji (custom/animated ones work too) to use as this "
         "product's icon everywhere it's shown — or <code>-</code> to use the default 🏷."
     ),
@@ -428,18 +424,18 @@ async def product_manage_text(p) -> str:
     stock = "∞ (unlimited)" if effective == db.UNLIMITED_STOCK else effective
     state = f"{cemoji('check', '✅')} Active" if p["active"] else f"{cemoji('block', '🚫')} Inactive"
     desc = render_desc(p) if p["description"] else "—"
-    offer_usdt, offer_inr, is_discounted = db.effective_price(p)
+    offer_usdt, is_discounted = db.effective_price(p)
     discount_line = ""
     if is_discounted:
         until_local = datetime.fromisoformat(p["offer_until"]).astimezone(IST).strftime("%d %b %H:%M IST")
         discount_line = (
-            f"{cemoji('sale', '🔥')} Discount: <b>{esc(price_both(offer_usdt, offer_inr))}</b> "
+            f"{cemoji('sale', '🔥')} Discount: <b>{esc(usdt(offer_usdt))}</b> "
             f"until {until_local}\n"
         )
     return (
         f"<b>Manage #{p['id']} — {render_name_with_icon(p)}</b>\n\n"
         f"{cemoji('pencil', '📝')} Description: {desc}\n"
-        f"{cemoji('money', '💰')} Price: <b>{esc(price_both(p['price'], p['price_inr']))}</b>\n"
+        f"{cemoji('money', '💰')} Price: <b>{esc(usdt(p['price']))}</b>\n"
         f"{discount_line}"
         f"{cemoji('restock', '📦')} Stock: <b>{stock}</b>\n"
         f"{cemoji('key', '🔑')} Delivery codes: <b>{await db.count_unused_keys(p['id'])}</b> unused\n"
@@ -521,7 +517,6 @@ async def delete_do(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 FIELD_HINTS = {
     "price": "Send the new <b>price in USDT</b> (number, e.g. <code>9.99</code>).",
-    "price_inr": "Send the new <b>price in INR</b> (number, e.g. <code>799</code>).",
     "stock": "Send the new <b>stock</b> count, or <code>unlimited</code>.",
     "name": "Send the new <b>name</b>.",
     "description": "Send the new <b>description</b> (or <code>-</code> for none).",
@@ -537,7 +532,7 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _, field, pid = query.data.split(":")
     pid = int(pid)
     p = await db.get_product(pid)
-    if not p or (field not in db.EDITABLE_FIELDS and field not in ("price_both", "icon")):
+    if not p or (field not in db.EDITABLE_FIELDS and field != "icon"):
         await _edit_or_replace(query, f"{cemoji('warn', '⚠️')} Product not found.", refresh_menu_kb("menu:products"))
         return ConversationHandler.END
     context.user_data["edit_pid"] = pid
@@ -555,23 +550,9 @@ async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=cancel_kb(),
         )
         return EDIT_VALUE
-    # Combined price edit: ask USDT first, then INR (handled step-by-step below).
-    if field == "price_both":
-        await context.bot.send_message(
-            update.effective_chat.id,
-            f"{cemoji('edit', '✏️')} Editing <b>price</b> of <b>{render_name(p)}</b>\n"
-            f"Current: <code>{esc(price_both(p['price'], p['price_inr']))}</code>\n\n"
-            "Step 1/2 — Send the new <b>price in USDT</b> "
-            "(number, e.g. <code>9.99</code>, or <code>0</code> for free).",
-            parse_mode=ParseMode.HTML,
-            reply_markup=cancel_kb(),
-        )
-        return EDIT_VALUE
     cur = p[field]
     if field == "price":
         cur = usdt(cur)
-    elif field == "price_inr":
-        cur = money(cur)
     elif field == "stock":
         cur = "unlimited" if cur == db.UNLIMITED_STOCK else cur
     await context.bot.send_message(
@@ -611,28 +592,7 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             return EDIT_VALUE
         field = "icon_char"
 
-    # Combined price edit, step 1: capture USDT, then ask for INR.
-    elif field == "price_both":
-        try:
-            usdt_val = float(raw.replace(",", ""))
-            if usdt_val < 0:
-                raise ValueError
-        except ValueError:
-            await update.message.reply_text(
-                f"{cemoji('warn', '⚠️')} Please send a valid USDT number (0 for free), e.g. 9.99",
-                parse_mode=ParseMode.HTML,
-            )
-            return EDIT_VALUE
-        context.user_data["new_price_usdt"] = usdt_val
-        await update.message.reply_text(
-            "Step 2/2 — Send the new <b>price in INR</b> "
-            "(number, e.g. <code>799</code>, or <code>0</code> for none).",
-            parse_mode=ParseMode.HTML,
-            reply_markup=cancel_kb(),
-        )
-        return EDIT_PRICE_INR
-
-    elif field in ("price", "price_inr"):
+    elif field == "price":
         try:
             value = float(raw.replace(",", ""))
             if value < 0:
@@ -664,7 +624,7 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         value = raw
     # else: field == "icon_char" — value already computed above.
 
-    old_prod = await db.get_product(pid) if field in ("stock", "price", "price_inr") else None
+    old_prod = await db.get_product(pid) if field in ("stock", "price") else None
     old_stock = old_prod["stock"] if old_prod else None
     await db.update_product(pid, field, value)
     if field in ("name", "description"):
@@ -693,61 +653,15 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                     context, update.effective_chat.id, "Restock",
                     _announcement_text("restock", p), pid,
                 )
-        elif field in ("price", "price_inr"):
-            old_val = float(old_prod[field])
+        elif field == "price":
+            old_val = float(old_prod["price"])
             if value != old_val:
                 text = _price_change_text(
-                    render_name(p), old_prod["price"], old_prod["price_inr"],
-                    p["price"], p["price_inr"], value > old_val,
+                    render_name(p), old_prod["price"], p["price"], value > old_val,
                 )
                 await _offer_announcement(
                     context, update.effective_chat.id, "Price update", text, pid
                 )
-    return ConversationHandler.END
-
-
-async def edit_price_inr_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Step 2 of the combined price edit: capture INR, write both prices at once."""
-    pid = context.user_data.get("edit_pid")
-    if pid is None:
-        return ConversationHandler.END
-    raw = update.message.text.strip()
-    try:
-        inr_val = float(raw.replace(",", ""))
-        if inr_val < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            f"{cemoji('warn', '⚠️')} Please send a valid INR number (0 for none), e.g. 799",
-            parse_mode=ParseMode.HTML,
-        )
-        return EDIT_PRICE_INR
-
-    usdt_val = context.user_data.get("new_price_usdt", 0.0)
-    old_prod = await db.get_product(pid)
-    await db.update_product(pid, "price", usdt_val)
-    await db.update_product(pid, "price_inr", inr_val)
-    context.user_data.pop("edit_pid", None)
-    context.user_data.pop("edit_field", None)
-    context.user_data.pop("new_price_usdt", None)
-
-    p = await db.get_product(pid)
-    await update.message.reply_text(f"{cemoji('check', '✅')} Updated <b>price</b>.", parse_mode=ParseMode.HTML)
-    await context.bot.send_message(
-        update.effective_chat.id, await product_manage_text(p),
-        parse_mode=ParseMode.HTML, reply_markup=manage_keyboard(p),
-    )
-    # Offer to broadcast the price change if either currency actually moved.
-    if p and p["active"] and old_prod is not None:
-        old_usdt, old_inr = float(old_prod["price"]), float(old_prod["price_inr"])
-        if p["price"] != old_usdt or p["price_inr"] != old_inr:
-            went_up = (p["price"] + p["price_inr"]) > (old_usdt + old_inr)
-            text = _price_change_text(
-                render_name(p), old_usdt, old_inr, p["price"], p["price_inr"], went_up,
-            )
-            await _offer_announcement(
-                context, update.effective_chat.id, "Price update", text, pid
-            )
     return ConversationHandler.END
 
 
@@ -792,7 +706,7 @@ async def addproduct_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         update, context, ADD_NAME,
         prefix=(
             f"{cemoji('plus', '➕')} <b>Add New Product</b>\n"
-            "<i>Let's get this listed — 6 quick steps.</i>\n\n"
+            "<i>Let's get this listed — 5 quick steps.</i>\n\n"
         ),
     )
 
@@ -827,22 +741,6 @@ async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ADD_PRICE
     context.user_data["new_product"]["price"] = price
-    return await _wizard_prompt(update, context, ADD_PRICE_INR)
-
-
-async def add_price_inr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    raw = update.message.text.strip().replace(",", "")
-    try:
-        price_inr = float(raw)
-        if price_inr < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            f"{cemoji('warn', '⚠️')} Please send a valid number (0 for free), e.g. 799",
-            parse_mode=ParseMode.HTML,
-        )
-        return ADD_PRICE_INR
-    context.user_data["new_product"]["price_inr"] = price_inr
     return await _wizard_prompt(update, context, ADD_STOCK)
 
 
@@ -892,7 +790,6 @@ async def add_icon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         price=p["price"],
         content=p.get("content", ""),
         stock=stock,
-        price_inr=p.get("price_inr", 0.0),
         name_html=p.get("name_html") or None,
         description_html=p.get("description_html") or None,
         icon_char=icon_char,
@@ -904,7 +801,7 @@ async def add_icon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         f"{cemoji('check', '✅')} <b>Product added!</b>\n\n"
         f"<blockquote>{cemoji('new', '🆕')} <b>#{product_id} {render_name(new_p)}</b>\n"
-        f"{cemoji('money', '💰')} {esc(price_both(p['price'], p.get('price_inr', 0.0)))}\n"
+        f"{cemoji('money', '💰')} {esc(usdt(p['price']))}\n"
         f"{cemoji('restock', '📦')} Stock: {stock_txt}</blockquote>\n\n"
         "Tap below to view, edit, or add delivery codes.",
         parse_mode=ParseMode.HTML,
@@ -1020,9 +917,9 @@ async def discount_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_message(
         update.effective_chat.id,
         f"{cemoji('sale', '🏷️')} <b>Discount for {render_name(p)}</b>\n"
-        f"Current price: <code>{esc(price_both(p['price'], p['price_inr']))}</code>\n\n"
-        "Step 1/3 — Send the discounted <b>price in USDT</b> "
-        "(must be lower than the current USDT price).",
+        f"Current price: <code>{esc(usdt(p['price']))}</code>\n\n"
+        "Step 1/2 — Send the discounted <b>price in USDT</b> "
+        "(must be lower than the current price).",
         parse_mode=ParseMode.HTML,
         reply_markup=cancel_kb(),
     )
@@ -1052,31 +949,7 @@ async def discount_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return DISCOUNT_PRICE
     context.user_data["discount_usdt"] = usdt_val
     await update.message.reply_text(
-        "Step 2/3 — Send the discounted <b>price in INR</b> (number, or <code>0</code> for none).",
-        parse_mode=ParseMode.HTML,
-        reply_markup=cancel_kb(),
-    )
-    return DISCOUNT_PRICE_INR
-
-
-async def discount_price_inr(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    pid = context.user_data.get("discount_pid")
-    if pid is None:
-        return ConversationHandler.END
-    raw = update.message.text.strip()
-    try:
-        inr_val = float(raw.replace(",", ""))
-        if inr_val < 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            f"{cemoji('warn', '⚠️')} Send a valid INR number (0 for none), e.g. 599",
-            parse_mode=ParseMode.HTML,
-        )
-        return DISCOUNT_PRICE_INR
-    context.user_data["discount_inr"] = inr_val
-    await update.message.reply_text(
-        "Step 3/3 — Send how long the discount should run: "
+        "Step 2/2 — Send how long the discount should run: "
         "e.g. <code>24h</code>, <code>3d</code>, or <code>30m</code>.",
         parse_mode=ParseMode.HTML,
         reply_markup=cancel_kb(),
@@ -1098,10 +971,9 @@ async def discount_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return DISCOUNT_DURATION
 
     offer_usdt = context.user_data.pop("discount_usdt")
-    offer_inr = context.user_data.pop("discount_inr")
     context.user_data.pop("discount_pid", None)
     offer_until = (datetime.now(timezone.utc) + delta).isoformat(timespec="seconds")
-    await db.set_product_offer(pid, offer_usdt, offer_inr, offer_until)
+    await db.set_product_offer(pid, offer_usdt, offer_until)
 
     p = await db.get_product(pid)
     if not p:
@@ -1115,7 +987,7 @@ async def discount_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parse_mode=ParseMode.HTML, reply_markup=manage_keyboard(p),
     )
     if p["active"]:
-        text = _sale_text(render_name(p), p["price"], p["price_inr"], offer_usdt, offer_inr, raw)
+        text = _sale_text(render_name(p), p["price"], offer_usdt, raw)
         await _offer_announcement(context, update.effective_chat.id, "Flash sale", text, pid)
     return ConversationHandler.END
 

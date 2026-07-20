@@ -24,34 +24,14 @@ def _fmt(amount: float) -> str:
     return s.rstrip("0").rstrip(".")
 
 
-def money(amount: float) -> str:
-    return "" if amount == 0 else f"₹{_fmt(amount)}"
-
-
 def usdt(amount: float) -> str:
     return "Free" if amount == 0 else f"{_fmt(amount)} USDT"
 
 
-def price_both(usdt_amount: float, inr_amount: float = 0.0) -> str:
-    """Render a product's price in both currencies, e.g. '9.99 USDT (₹920.00)'.
-
-    Both prices are set manually per product; the INR part is shown only when an
-    INR price has actually been set (> 0).
-    """
-    if usdt_amount == 0 and (not inr_amount or inr_amount == 0):
-        return "Free"
-    if inr_amount and inr_amount > 0:
-        return f"{usdt(usdt_amount)} / {money(inr_amount)}"
-    return usdt(usdt_amount)
-
-
 def order_amount_str(order) -> str:
+    """An order's amount for display — USDT only."""
     amt_usdt = order["amount_usdt"] if "amount_usdt" in order.keys() else 0.0
-    inr = money(order["amount"])
-    usdt_str = usdt(amt_usdt) if amt_usdt > 0 else ""
-    if inr and usdt_str:
-        return f"{usdt_str} / {inr}"
-    return inr or usdt_str or "Free"
+    return usdt(amt_usdt)
 
 
 def qty_suffix(order) -> str:

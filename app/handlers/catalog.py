@@ -2,8 +2,8 @@
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app import config, db
-from app.formatting import cemoji, esc, price_both, render_desc, render_name_with_icon
+from app import db
+from app.formatting import cemoji, esc, render_desc, render_name_with_icon, usdt
 from app.keyboards import back_to_menu_kb, catalog_keyboard, product_detail_keyboard, refresh_menu_kb
 from app.render import _render
 
@@ -55,16 +55,14 @@ async def view_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = f"<b>{render_name_with_icon(p)}</b>\n"
     if desc:
         text += f"{render_desc(p)}\n"
-    offer_usdt, offer_inr, is_discounted = db.effective_price(p)
-    inr = 0.0 if config.is_auto_mode() else offer_inr
+    offer_usdt, is_discounted = db.effective_price(p)
     if is_discounted:
-        orig_inr = 0.0 if config.is_auto_mode() else p["price_inr"]
         text += (
             f"\n{cemoji('sale', '🔥')} <b>Flash sale!</b>\n"
-            f"{cemoji('money', '💰')} <s>{esc(price_both(p['price'], orig_inr))}</s> → "
-            f"<b>{esc(price_both(offer_usdt, inr))}</b>"
+            f"{cemoji('money', '💰')} <s>{esc(usdt(p['price']))}</s> → "
+            f"<b>{esc(usdt(offer_usdt))}</b>"
         )
     else:
-        text += f"\n{cemoji('money', '💰')} <b>Price: {esc(price_both(offer_usdt, inr))}</b>"
+        text += f"\n{cemoji('money', '💰')} <b>Price: {esc(usdt(offer_usdt))}</b>"
     text += stock_line
     await _render(update, text, product_detail_keyboard(p, in_stock))

@@ -109,7 +109,7 @@ export default async function OrdersPage({
 
         <TabsContent value="pending">
           <p className="text-sm text-[var(--ink-muted)]">
-            Manual UPI / Binance Pay / crypto orders awaiting your approve or reject.
+            Manual Binance Pay / crypto orders awaiting your approve or reject.
           </p>
           <OrderTable orders={pending} actionable emptyMessage="Nothing waiting." />
         </TabsContent>

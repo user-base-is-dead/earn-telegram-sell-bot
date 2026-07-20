@@ -6,7 +6,6 @@ export type ProductInput = {
   name: string;
   description: string;
   price: number;
-  price_inr: number;
   content: string;
   stock: number;
 };
