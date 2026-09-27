@@ -52,7 +52,10 @@ Admins (`ADMIN_IDS`) also get **🛠 Admin**:
 - **➕ New product**: send `Name | price` (e.g. `Netflix 1 Month | 4.99`), then paste its logins,
   one per line, or send a `.txt` file.
 - Tap a product for **➕ Add logins**, **💲 Change price**, **🗑 Delete unsold** and **❌ Remove**.
-- The panel also shows open orders and the last 24 hours of sales.
+- **👥 Users** lists everyone who has used the bot: when they were last active, how many times
+  they clicked, how many orders they paid and what they did last. **📄 All users** sends the full
+  list as a CSV file.
+- The panel also shows open orders, the last 24 hours of sales and how many users were active.
 
 The same actions work as commands too: `/add Name | price`, `/stock ID` with the logins on the
 lines below it, `/price ID price`, `/clear ID`, `/del ID`.

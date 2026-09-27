@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
 import html
+import io
 import logging
 import re
 import sys
@@ -35,6 +37,7 @@ from telegram.ext import (
     ContextTypes,
     Defaults,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -60,6 +63,7 @@ RESERVE_SECONDS = PAYABLE_SECONDS + 2 * payments.CLOCK_SLACK
 
 QTY_CHOICES = (1, 2, 3, 5, 10)
 MAX_QTY = 100  # the most a buyer can type in as a custom quantity (never more than is in stock)
+USERS_SHOWN = 20  # users listed on the admin's 👥 Users screen (all of them are in the file)
 MAX_ORDERS_PER_HOUR = 10
 EXPIRE_GRACE = 60  # seconds past the deadline before an order closes, for last-second payments
 RPC_ALERT_AFTER = 8  # failed payment checks in a row (~2 min) before the admins are alerted
@@ -356,6 +360,50 @@ async def payments_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             "automatically while in stock.",
             SHOP_BUTTON,
         )
+
+
+# ---- who uses the bot (shown to admins under 👥 Users) ----------------------------------------
+
+
+async def describe_action(update: Update) -> str:
+    """A short, human description of what a user just did."""
+    if update.callback_query is not None:
+        kind, _, rest = (update.callback_query.data or "").partition(":")
+        if kind in ("p", "b", "q"):
+            pid, _, qty = rest.partition(":")
+            product = await DB.product(int(pid)) if pid.isdigit() and len(pid) <= 9 else None
+            name = product["name"] if product is not None else f"product #{pid}"
+            return {"p": f"viewed {name}", "b": f"chose to buy {qty} × {name}", "q": f"entering a quantity for {name}"}[kind]
+        return {
+            "home": "opened the shop",
+            "orders": "opened My orders",
+            "help": "opened Help",
+            "c": f"checked payment of order #{rest}",
+            "x": f"cancelled order #{rest}",
+            "a": "used the admin panel",
+        }.get(kind, "pressed an old button")
+    msg = update.effective_message
+    if msg is not None and msg.text:
+        text = msg.text.strip()
+        if text.startswith("/"):
+            return f"sent {text.split()[0][:32]}"
+        if text in (BTN_SHOP, BTN_ORDERS, BTN_HELP, BTN_ADMIN):
+            return f"pressed {text}"
+        return "typed a message"
+    if msg is not None and msg.document:
+        return "sent a file"
+    return "used the bot"
+
+
+async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs before every handler: remember who is using the bot and what they did last."""
+    user, chat = update.effective_user, update.effective_chat
+    if user is None or user.is_bot or chat is None or chat.type != "private":
+        return
+    try:
+        await DB.touch_user(user.id, user.username, user.full_name, await describe_action(update))
+    except Exception:  # never let bookkeeping get in the way of serving the user
+        log.exception("Could not record user %s", user.id)
 
 
 # ---- buyer handlers ---------------------------------------------------------------------------
@@ -666,13 +714,20 @@ def parse_product(text: str) -> tuple[str, int | None]:
 async def admin_home() -> tuple[str, InlineKeyboardMarkup]:
     products = await DB.products()
     s = await DB.summary()
+    u = await DB.user_stats()
     text = (
         "🛠 <b>Admin</b>\n\n"
         f"🧾 Open orders: {s['open_orders']} · Waiting for stock: {s['backorders']}\n"
-        f"💰 Last 24h: {s['sales']} sales · {payments.usdt(s['units'])} USDT\n\n"
+        f"💰 Last 24h: {s['sales']} sales · {payments.usdt(s['units'])} USDT\n"
+        f"👥 Users: {u['total']} total · {u['active']} active in the last 24h\n\n"
         + ("Tap a product to add logins, change its price or remove it." if products else "No products yet. Add one 👇")
     )
-    rows = [[InlineKeyboardButton("➕ New product", callback_data="a:new")]]
+    rows = [
+        [
+            InlineKeyboardButton("➕ New product", callback_data="a:new"),
+            InlineKeyboardButton("👥 Users", callback_data="a:users"),
+        ]
+    ]
     rows += [
         [InlineKeyboardButton(f"{p['name']} · {usd(p['price_cents'])} · {p['in_stock']} left", callback_data=f"a:p:{p['id']}")]
         for p in products
@@ -704,6 +759,63 @@ def admin_product_screen(p: Row) -> tuple[str, InlineKeyboardMarkup]:
     return text, markup
 
 
+def ago(ts: int) -> str:
+    seconds = max(0, int(time.time()) - ts)
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+async def users_screen() -> tuple[str, InlineKeyboardMarkup]:
+    """Who has used the bot, most recent first: when, how much, and what they did last."""
+    stats = await DB.user_stats()
+    head = f"👥 <b>Users</b>: {stats['total']} total · {stats['active']} active in the last 24h\n"
+    blocks = []
+    for n, u in enumerate(await DB.users(limit=USERS_SHOWN), 1):
+        handle = f" @{esc(u['username'])}" if u["username"] else ""
+        block = (
+            f"\n{n}. <a href=\"tg://user?id={u['id']}\">{esc(u['name'])}</a>{handle} · <code>{u['id']}</code>\n"
+            f"🕒 {ago(u['last_seen'])} · 👆 {u['clicks']} clicks · 🛒 {u['orders']} paid orders"
+        )
+        if u["last_action"]:
+            block += f"\n↳ {esc(u['last_action'])}"
+        if len(head) + sum(map(len, blocks)) + len(block) > MAX_TEXT - 200:
+            break
+        blocks.append(block)
+    text = head + ("".join(blocks) if blocks else "\nNobody has used the bot yet.")
+    if stats["total"] > len(blocks):
+        text += f"\n\n<i>Showing the latest {len(blocks)}. Tap 📄 for everyone.</i>"
+    markup = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📄 All users (file)", callback_data="a:users_file")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="a:home")],
+        ]
+    )
+    return text, markup
+
+
+async def send_users_file(bot, chat_id: int) -> None:
+    def utc(ts: int) -> str:
+        return time.strftime("%Y-%m-%d %H:%M", time.gmtime(ts))
+
+    buf = io.StringIO()
+    out = csv.writer(buf)
+    out.writerow(["user_id", "username", "name", "first_seen_utc", "last_seen_utc", "clicks", "paid_orders", "last_action"])
+    for u in await DB.users():
+        out.writerow(
+            [u["id"], u["username"] or "", u["name"], utc(u["first_seen"]), utc(u["last_seen"]), u["clicks"], u["orders"],
+             u["last_action"] or ""]
+        )
+    try:  # utf-8-sig so Excel shows non-English names correctly
+        await bot.send_document(chat_id, document=buf.getvalue().encode("utf-8-sig"), filename="users.csv")
+    except TelegramError as exc:
+        log.warning("Could not send the users file: %s", exc)
+
+
 async def reply_product_screen(update: Update, product_id: int) -> None:
     """After an admin action, show that product's buttons again so the next step is one tap."""
     p = await DB.product(product_id)
@@ -725,6 +837,15 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _, action, *rest = q.data.split(":")
     context.user_data.pop("await", None)  # any admin button abandons a pending question
+    if action == "users":
+        await q.answer()
+        text, markup = await users_screen()
+        await edit(q, text, markup)
+        return
+    if action == "users_file":
+        await q.answer("Sending the list…")
+        await send_users_file(context.bot, q.from_user.id)
+        return
     if action == "new":
         context.user_data["await"] = ("new", 0)
         await q.answer()
@@ -981,6 +1102,7 @@ def main() -> None:
 
     private = filters.ChatType.PRIVATE
     admin = private & filters.User(user_id=CFG.admin_ids)
+    app.add_handler(TypeHandler(Update, track_user), group=-1)  # runs first, for every update
     app.add_handlers(
         [
             CommandHandler("start", cmd_start, filters=private),
@@ -1002,7 +1124,9 @@ def main() -> None:
             CallbackQueryHandler(cb_cancel, pattern=r"^x:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_orders, pattern=r"^orders$"),
             CallbackQueryHandler(cb_help, pattern=r"^help$"),
-            CallbackQueryHandler(cb_admin, pattern=r"^a:(home|new|(p|stock|price|clear|del|clear_yes|del_yes):[0-9]{1,9})$"),
+            CallbackQueryHandler(
+                cb_admin, pattern=r"^a:(home|new|users|users_file|(p|stock|price|clear|del|clear_yes|del_yes):[0-9]{1,9})$"
+            ),
             CallbackQueryHandler(cb_outdated),
         ]
     )

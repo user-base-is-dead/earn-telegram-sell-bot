@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Everyone who has used the bot, for the admin's 👥 Users list.
+CREATE TABLE IF NOT EXISTS users (
+    id          INTEGER PRIMARY KEY,  -- Telegram user id
+    username    TEXT,
+    name        TEXT    NOT NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    clicks      INTEGER NOT NULL DEFAULT 0,
+    last_action TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_users_last_seen ON users (last_seen);
 """
 
 INVOICE_SQL = "SELECT i.*, p.name AS product_name FROM invoices i JOIN products p ON p.id = i.product_id"
@@ -362,6 +374,33 @@ class Database:
                      WHERE status IN ('paid', 'backorder') AND paid_at >= ?) AS units
             """,
             (since, since),
+        )
+
+    # ---- users ----------------------------------------------------------------------------------
+
+    async def touch_user(self, user_id: int, username: str | None, name: str, action: str) -> None:
+        """Record that a user did something (any message or button press)."""
+        now = _now()
+        async with self.tx() as conn:
+            await conn.execute(
+                "INSERT INTO users (id, username, name, first_seen, last_seen, clicks, last_action)"
+                " VALUES (?, ?, ?, ?, ?, 1, ?)"
+                " ON CONFLICT (id) DO UPDATE SET username = excluded.username, name = excluded.name,"
+                " last_seen = excluded.last_seen, clicks = clicks + 1, last_action = excluded.last_action",
+                (user_id, username, name, now, now, action),
+            )
+
+    async def users(self, limit: int | None = None) -> list[Row]:
+        """Users, most recently active first, with how many orders each has paid for."""
+        return await self._read_all(
+            "SELECT u.*, (SELECT COUNT(*) FROM invoices i WHERE i.user_id = u.id"
+            " AND i.status IN ('paid', 'backorder')) AS orders FROM users u ORDER BY u.last_seen DESC LIMIT ?",
+            (limit if limit else -1,),
+        )
+
+    async def user_stats(self) -> Row:
+        return await self._read_one(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(last_seen >= ?), 0) AS active FROM users", (_now() - 86400,)
         )
 
     # ---- payments -----------------------------------------------------------------------------
