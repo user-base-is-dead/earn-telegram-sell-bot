@@ -59,15 +59,17 @@ SCANNER = payments.Scanner(DB, CHAIN, window=PAYABLE_SECONDS)
 RESERVE_SECONDS = PAYABLE_SECONDS + 2 * payments.CLOCK_SLACK
 
 QTY_CHOICES = (1, 2, 3, 5, 10)
+MAX_QTY = 100  # the most a buyer can type in as a custom quantity (never more than is in stock)
 MAX_ORDERS_PER_HOUR = 10
 EXPIRE_GRACE = 60  # seconds past the deadline before an order closes, for last-second payments
 RPC_ALERT_AFTER = 8  # failed payment checks in a row (~2 min) before the admins are alerted
 MAX_TEXT = 3900  # stay under Telegram's 4096-character message limit
 
 esc = html.escape
-SHOP_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Shop", callback_data="home")]])
-# The menu kept at the bottom of the chat. Tapping one sends its label as a message.
+# The menu kept at the bottom of the chat. Tapping one sends its label as a message; the same
+# choices are also inline buttons on the shop message.
 BTN_SHOP, BTN_ORDERS, BTN_HELP, BTN_ADMIN = "🛍 Shop", "📦 My orders", "❓ Help", "🛠 Admin"
+SHOP_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton(BTN_SHOP, callback_data="home")]])
 _rpc_failures = 0
 
 
@@ -145,7 +147,7 @@ async def close_invoice(bot, inv: Row, text: str, markup: InlineKeyboardMarkup |
 # ---- screens ----------------------------------------------------------------------------------
 
 
-async def shop_screen() -> tuple[str, InlineKeyboardMarkup]:
+async def shop_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     products = await DB.products()
     rows = [
         [
@@ -156,9 +158,9 @@ async def shop_screen() -> tuple[str, InlineKeyboardMarkup]:
         ]
         for p in products
     ]
-    rows.append(
-        [InlineKeyboardButton("📦 My orders", callback_data="orders"), InlineKeyboardButton("❓ Help", callback_data="help")]
-    )
+    rows.append([InlineKeyboardButton(BTN_ORDERS, callback_data="orders"), InlineKeyboardButton(BTN_HELP, callback_data="help")])
+    if user_id in CFG.admin_ids:
+        rows.append([InlineKeyboardButton(BTN_ADMIN, callback_data="a:home")])
     text = (
         f"🛍 <b>{esc(CFG.store_name)}</b>\n\n"
         "Pick a product. You pay with <b>USDT (BEP20)</b> and your login is delivered right here, "
@@ -177,19 +179,40 @@ def menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
 
 
 def product_screen(p: Row) -> tuple[str, InlineKeyboardMarkup]:
-    lines = [f"<b>{esc(p['name'])}</b>", "", f"💵 Price: <b>{usd(p['price_cents'])}</b> each"]
+    lines = [f"🛍 <b>{esc(p['name'])}</b>", "", f"💵 Price: <b>{usd(p['price_cents'])}</b> each"]
     if CFG.fee_cents:
         lines.append(f"➕ Fee: {usd(CFG.fee_cents)} per order")
-    lines.append(f"📦 In stock: {p['in_stock']}")
-    buttons = [
-        InlineKeyboardButton(f"{q} · {usd(p['price_cents'] * q + CFG.fee_cents)}", callback_data=f"b:{p['id']}:{q}")
-        for q in QTY_CHOICES
-        if q <= p["in_stock"]
-    ]
-    lines += ["", "How many would you like?" if buttons else "😕 Sold out right now. Check back later!"]
-    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    lines.append(f"📦 In stock: <b>{p['in_stock']}</b>")
+    choices = [q for q in QTY_CHOICES if q <= p["in_stock"]]
+    rows = []
+    if choices:
+        lines += [
+            "",
+            "👇 <b>SELECT QUANTITY</b>",
+            "Tap how many you want to buy, or <b>✏️ Enter quantity</b> for any other number.",
+        ]
+        buttons = [
+            InlineKeyboardButton(f"🛒 Buy {q} · {usd(p['price_cents'] * q + CFG.fee_cents)}", callback_data=f"b:{p['id']}:{q}")
+            for q in choices
+        ]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton("✏️ Enter quantity", callback_data=f"q:{p['id']}")])
+    else:
+        lines += ["", "😕 <b>Sold out right now.</b> Check back later!"]
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home")])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+def quantity_prompt(p: Row) -> tuple[str, InlineKeyboardMarkup]:
+    most = min(p["in_stock"], MAX_QTY)
+    fee = f" (+ {usd(CFG.fee_cents)} fee per order)" if CFG.fee_cents else ""
+    text = (
+        "✏️ <b>ENTER QUANTITY</b>\n\n"
+        f"How many <b>{esc(p['name'])}</b> do you want?\n"
+        f"Type a number from <b>1</b> to <b>{most}</b> and send it.\n\n"
+        f"💵 {usd(p['price_cents'])} each{fee}"
+    )
+    return text, InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"p:{p['id']}")]])
 
 
 def invoice_screen(inv: Row) -> tuple[str, InlineKeyboardMarkup]:
@@ -348,25 +371,29 @@ BUY_ERRORS = {
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("await", None)
     await update.effective_message.reply_text(
-        f"👋 Welcome to <b>{esc(CFG.store_name)}</b>! The buttons below are always here.",
+        f"👋 Welcome to <b>{esc(CFG.store_name)}</b>!",
         reply_markup=menu_keyboard(update.effective_user.id),
     )
-    text, markup = await shop_screen()
+    text, markup = await shop_screen(update.effective_user.id)
     await update.effective_message.reply_text(text, reply_markup=markup)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Any text: a bottom-menu button, an answer the admin was asked for, or else the shop."""
+    """Any text: a bottom-menu button, the answer to a question the bot asked, or else the shop."""
     user = update.effective_user
     text = (update.effective_message.text or "").strip()
     is_admin = user.id in CFG.admin_ids
+    pending = context.user_data.get("await")
     if text in (BTN_SHOP, BTN_ORDERS, BTN_HELP, BTN_ADMIN) or text.startswith("/"):
         context.user_data.pop("await", None)  # a menu tap or command abandons a pending question
-    elif is_admin and context.user_data.get("await"):
+    elif pending and pending[0] == "qty":
+        await quantity_input(update, context, text, pending[1])
+        return
+    elif pending and is_admin:
         await admin_input(update, context, update.effective_message.text)
         return
     if text == BTN_SHOP:
-        shop_text, markup = await shop_screen()
+        shop_text, markup = await shop_screen(update.effective_user.id)
         await update.effective_message.reply_text(shop_text, reply_markup=markup)
     elif text == BTN_ORDERS:
         await show_orders(context.bot, user.id)
@@ -379,33 +406,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cb_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await", None)
     await update.callback_query.answer()
-    text, markup = await shop_screen()
+    text, markup = await shop_screen(update.effective_user.id)
     await edit(update.callback_query, text, markup)
 
 
 async def cb_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await", None)
     q = update.callback_query
     product = await DB.product(int(q.data.split(":")[1]))
     if product is None:
         await q.answer("This product is no longer available.", show_alert=True)
-        text, markup = await shop_screen()
+        text, markup = await shop_screen(update.effective_user.id)
     else:
         await q.answer()
         text, markup = product_screen(product)
     await edit(q, text, markup)
 
 
-async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    _, product_id, qty = q.data.split(":")
-    product_id, qty = int(product_id), int(qty)
-    if qty not in QTY_CHOICES:
-        await q.answer()
-        return
+async def open_order(context: ContextTypes.DEFAULT_TYPE, user: User, product_id: int, qty: int) -> tuple[str, Row | None]:
     outcome, inv = await DB.create_invoice(
-        user_id=q.from_user.id,
-        buyer=buyer_name(q.from_user),
+        user_id=user.id,
+        buyer=buyer_name(user),
         product_id=product_id,
         qty=qty,
         fee_cents=CFG.fee_cents,
@@ -414,30 +437,86 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         max_per_hour=MAX_ORDERS_PER_HOUR,
         pick_amount=payments.pick_amount,
     )
+    if outcome == "created":
+        amount = payments.usdt(inv["amount_units"])
+        log.info("Order #%s opened by %s: product %s x%s, %s USDT", inv["id"], user.id, product_id, qty, amount)
+    return outcome, inv
+
+
+async def show_invoice(context: ContextTypes.DEFAULT_TYPE, user_id: int, inv: Row, query=None) -> None:
+    """Show the payment details, in place of the product message when there is one."""
+    text, markup = invoice_screen(inv)
+    message_id = None
+    if query is not None and query.message is not None:
+        try:
+            await query.edit_message_text(text, reply_markup=markup)
+            message_id = query.message.message_id
+        except TelegramError:
+            pass
+    if message_id is None:  # never leave a buyer without the payment details
+        msg = await send(context.bot, user_id, text, reply_markup=markup)
+        message_id = msg.message_id if msg else None
+    if message_id:
+        await DB.set_invoice_message(inv["id"], message_id)
+
+
+async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await", None)
+    q = update.callback_query
+    _, product_id, qty = q.data.split(":")
+    product_id, qty = int(product_id), int(qty)
+    if not 1 <= qty <= MAX_QTY:
+        await q.answer()
+        return
+    outcome, inv = await open_order(context, q.from_user, product_id, qty)
+    if outcome == "created":
+        await q.answer()
+        await show_invoice(context, q.from_user.id, inv, q)
+    elif outcome == "open":
+        await q.answer("You already have an open order. Pay or cancel it first.", show_alert=True)
+        await show_invoice(context, q.from_user.id, inv)
+    else:
+        await q.answer(BUY_ERRORS[outcome], show_alert=True)
+        product = await DB.product(product_id)
+        text, markup = product_screen(product) if product is not None else await shop_screen(update.effective_user.id)
+        await edit(q, text, markup)
+
+
+async def cb_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """✏️ Enter quantity: ask the buyer to type how many they want."""
+    q = update.callback_query
+    product = await DB.product(int(q.data.split(":")[1]))
+    if product is None or product["in_stock"] < 1:
+        await q.answer("Sold out right now." if product else "This product is no longer available.", show_alert=True)
+        return
+    context.user_data["await"] = ("qty", product["id"])
+    await q.answer()
+    text, markup = quantity_prompt(product)
+    await edit(q, text, markup)
+
+
+async def quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, product_id: int) -> None:
+    """The number a buyer typed after ✏️ Enter quantity."""
+    msg = update.effective_message
+    product = await DB.product(product_id)
+    if product is None or product["in_stock"] < 1:
+        context.user_data.pop("await", None)
+        await msg.reply_text("😕 Sorry, this product is sold out right now.", reply_markup=SHOP_BUTTON)
+        return
+    most = min(product["in_stock"], MAX_QTY)
+    qty = int(text) if re.fullmatch(r"[0-9]{1,6}", text) else 0
+    if not 1 <= qty <= most:
+        _, back = quantity_prompt(product)
+        await msg.reply_text(f"❌ Please send just a number from <b>1</b> to <b>{most}</b>.", reply_markup=back)
+        return
+    context.user_data.pop("await", None)
+    outcome, inv = await open_order(context, update.effective_user, product_id, qty)
     if outcome in ("created", "open"):
         if outcome == "open":
-            await q.answer("You already have an open order. Pay or cancel it first.", show_alert=True)
-        else:
-            await q.answer()
-            log.info("Order #%s opened by %s: %s USDT", inv["id"], q.from_user.id, payments.usdt(inv["amount_units"]))
-        text, markup = invoice_screen(inv)
-        message_id = None
-        if outcome == "created" and q.message is not None:
-            try:
-                await q.edit_message_text(text, reply_markup=markup)
-                message_id = q.message.message_id
-            except TelegramError:
-                pass
-        if message_id is None:  # never leave a buyer without the payment details
-            msg = await send(context.bot, q.from_user.id, text, reply_markup=markup)
-            message_id = msg.message_id if msg else None
-        if message_id:
-            await DB.set_invoice_message(inv["id"], message_id)
-        return
-    await q.answer(BUY_ERRORS[outcome], show_alert=True)
-    product = await DB.product(product_id)
-    text, markup = product_screen(product) if product is not None else await shop_screen()
-    await edit(q, text, markup)
+            await msg.reply_text("You already have an open order. Pay or cancel it first 👇")
+        await show_invoice(context, update.effective_user.id, inv)
+    else:
+        await msg.reply_text(BUY_ERRORS[outcome], reply_markup=product_screen(product)[1])
 
 
 async def cb_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -495,7 +574,7 @@ async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_orders(bot, user_id: int) -> None:
     orders = await DB.orders(user_id)
     if not orders:
-        await send(bot, user_id, f"📦 No orders yet. Tap {BTN_SHOP} to buy something.")
+        await send(bot, user_id, "📦 No orders yet.", reply_markup=SHOP_BUTTON)
         return
     blocks = []
     for inv, items in orders:
@@ -508,10 +587,10 @@ async def show_orders(bot, user_id: int) -> None:
         blocks.append(f"<b>#{inv['id']}</b> · {esc(inv['product_name'])} × {inv['qty']} · {day}\n{body}")
     text = "📦 <b>Your latest orders</b>\n\n" + "\n\n".join(blocks)
     if len(text) <= MAX_TEXT:
-        await send(bot, user_id, text)
+        await send(bot, user_id, text, reply_markup=SHOP_BUTTON)
         return
     plain = "\n\n".join(f"#{inv['id']} {inv['product_name']} x{inv['qty']}\n" + "\n".join(items) for inv, items in orders)
-    await send(bot, user_id, "📦 Your latest orders are in the file below.")
+    await send(bot, user_id, "📦 Your latest orders are in the file below.", reply_markup=SHOP_BUTTON)
     try:
         await bot.send_document(user_id, document=plain.encode(), filename="orders.txt")
     except TelegramError as exc:
@@ -539,7 +618,7 @@ async def cb_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cb_outdated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Buttons on old messages (e.g. from the previous bot) that no longer mean anything."""
     await update.callback_query.answer("This button is outdated. Here is the shop.")
-    text, markup = await shop_screen()
+    text, markup = await shop_screen(update.effective_user.id)
     await send(context.bot, update.effective_user.id, text, reply_markup=markup)
 
 
@@ -598,6 +677,7 @@ async def admin_home() -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton(f"{p['name']} · {usd(p['price_cents'])} · {p['in_stock']} left", callback_data=f"a:p:{p['id']}")]
         for p in products
     ]
+    rows.append([InlineKeyboardButton(BTN_SHOP, callback_data="home")])
     return text, InlineKeyboardMarkup(rows)
 
 
@@ -916,7 +996,8 @@ def main() -> None:
             MessageHandler(private & filters.TEXT, on_text),  # menu buttons, admin answers, else the shop
             CallbackQueryHandler(cb_home, pattern=r"^home$"),
             CallbackQueryHandler(cb_product, pattern=r"^p:[0-9]{1,9}$"),
-            CallbackQueryHandler(cb_buy, pattern=r"^b:[0-9]{1,9}:[0-9]{1,2}$"),
+            CallbackQueryHandler(cb_buy, pattern=r"^b:[0-9]{1,9}:[0-9]{1,3}$"),
+            CallbackQueryHandler(cb_quantity, pattern=r"^q:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_check, pattern=r"^c:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_cancel, pattern=r"^x:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_orders, pattern=r"^orders$"),

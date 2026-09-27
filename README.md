@@ -6,7 +6,8 @@ payment gateway and no manual approval, because the bot reads the blockchain its
 
 ## How a sale works
 
-1. The buyer taps /start and picks a product and a quantity.
+1. The buyer taps 🛍 Shop and picks a product and a quantity (a preset button, or ✏️ Enter
+   quantity for any number up to what's in stock).
 2. The bot shows an amount that belongs to this order only, e.g. `5.2043 USDT` for a $5.00
    item with a $0.20 fee. The buyer has 30 minutes to pay. Nothing is held for them meanwhile:
    the logins stay on sale and go to whoever pays first.
