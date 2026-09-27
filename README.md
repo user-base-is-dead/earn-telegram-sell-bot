@@ -7,8 +7,9 @@ payment gateway and no manual approval, because the bot reads the blockchain its
 ## How a sale works
 
 1. The buyer taps /start and picks a product and a quantity.
-2. The bot reserves the logins and shows an amount that belongs to this order only, e.g.
-   `5.2043 USDT` for a $5.00 item with a $0.20 fee. The buyer has 30 minutes to pay.
+2. The bot shows an amount that belongs to this order only, e.g. `5.2043 USDT` for a $5.00
+   item with a $0.20 fee. The buyer has 30 minutes to pay. Nothing is held for them meanwhile:
+   the logins stay on sale and go to whoever pays first.
 3. The buyer sends exactly that amount to your wallet.
 4. Every 15 seconds the bot reads new USDT transfers into your wallet from a BSC node. The
    transfer pays the order whose amount it carries: the logins are sent to the buyer, and you
@@ -41,20 +42,23 @@ copy .env.example .env      # then fill in BOT_TOKEN, ADMIN_IDS and WALLET_ADDRE
 Keep it running (a VPS, or a service/`pm2`/`nohup` on a server). Payments that arrive while it
 is offline are picked up when it starts again.
 
-## Admin commands (in a private chat with the bot)
+## Using it
 
-| Command | What it does |
-| --- | --- |
-| `/admin` | Products, stock, open orders, last 24h sales |
-| `/add Netflix 1 Month \| 4.99` | Create a product |
-| `/stock 1` + one login per line below it | Add logins to product 1 (or send a `.txt` file with the caption `/stock 1`) |
-| `/price 1 5.99` | Change a price (open orders keep their amount) |
-| `/clear 1` | Delete product 1's unsold logins |
-| `/del 1` | Remove product 1 from the shop |
+Buyers get a menu at the bottom of the chat: **🛍 Shop**, **📦 My orders**, **❓ Help**.
 
-The same login is never added twice to a product. If a payment arrives after its order expired
-and the product has sold out in the meantime, the order waits and is delivered automatically on
-the next `/stock`.
+Admins (`ADMIN_IDS`) also get **🛠 Admin**:
+
+- **➕ New product**: send `Name | price` (e.g. `Netflix 1 Month | 4.99`), then paste its logins,
+  one per line, or send a `.txt` file.
+- Tap a product for **➕ Add logins**, **💲 Change price**, **🗑 Delete unsold** and **❌ Remove**.
+- The panel also shows open orders and the last 24 hours of sales.
+
+The same actions work as commands too: `/add Name | price`, `/stock ID` with the logins on the
+lines below it, `/price ID price`, `/clear ID`, `/del ID`.
+
+The same login is never added twice to a product. If a payment arrives after the product sold out
+(someone else paid first), that order waits and is delivered automatically when logins are added;
+the buyer and the admins are told.
 
 ## Files
 

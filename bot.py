@@ -21,6 +21,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
+    ReplyKeyboardMarkup,
     Update,
     User,
 )
@@ -65,6 +66,8 @@ MAX_TEXT = 3900  # stay under Telegram's 4096-character message limit
 
 esc = html.escape
 SHOP_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Shop", callback_data="home")]])
+# The menu kept at the bottom of the chat. Tapping one sends its label as a message.
+BTN_SHOP, BTN_ORDERS, BTN_HELP, BTN_ADMIN = "🛍 Shop", "📦 My orders", "❓ Help", "🛠 Admin"
 _rpc_failures = 0
 
 
@@ -118,18 +121,6 @@ async def send(bot, chat_id: int, text: str, **kwargs):
         return None
 
 
-async def send_long(bot, chat_id: int, text: str) -> None:
-    """Send text that may exceed one message, split at line breaks."""
-    chunk = ""
-    for line in text.split("\n"):
-        if chunk and len(chunk) + len(line) + 1 > MAX_TEXT:
-            await send(bot, chat_id, chunk)
-            chunk = ""
-        chunk += line + "\n"
-    if chunk.strip():
-        await send(bot, chat_id, chunk)
-
-
 async def tell_admins(bot, text: str) -> None:
     for admin_id in CFG.admin_ids:
         await send(bot, admin_id, text)
@@ -169,13 +160,20 @@ async def shop_screen() -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("📦 My orders", callback_data="orders"), InlineKeyboardButton("❓ Help", callback_data="help")]
     )
     text = (
-        f"👋 Welcome to <b>{esc(CFG.store_name)}</b>!\n\n"
+        f"🛍 <b>{esc(CFG.store_name)}</b>\n\n"
         "Pick a product. You pay with <b>USDT (BEP20)</b> and your login is delivered right here, "
         "automatically, as soon as the payment confirms."
     )
     if not products:
         text += "\n\n<i>Nothing for sale yet. Check back soon!</i>"
     return text, InlineKeyboardMarkup(rows)
+
+
+def menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
+    rows = [[BTN_SHOP, BTN_ORDERS], [BTN_HELP]]
+    if user_id in CFG.admin_ids:
+        rows[1].append(BTN_ADMIN)
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
 def product_screen(p: Row) -> tuple[str, InlineKeyboardMarkup]:
@@ -205,7 +203,7 @@ def invoice_screen(inv: Row) -> tuple[str, InlineKeyboardMarkup]:
         "⚠️ Send the exact amount, last digits included: they identify your order. Paying from an "
         "exchange? The amount that <i>arrives</i> must match, so add the withdrawal fee on top. "
         "Only USDT on BEP20; other coins or networks are lost.\n\n"
-        f"⏱ Pay within <b>{minutes} min</b>. Your item is reserved until then.\n"
+        f"⏱ Pay within <b>{minutes} min</b>. Stock goes to whoever pays first.\n"
         "✅ Your login is delivered here automatically, usually within a minute of paying."
     )
     markup = InlineKeyboardMarkup(
@@ -224,11 +222,11 @@ def invoice_screen(inv: Row) -> tuple[str, InlineKeyboardMarkup]:
 def help_text() -> str:
     return (
         "❓ <b>How to buy</b>\n\n"
-        "1. Tap /start and pick a product and a quantity.\n"
+        f"1. Tap {BTN_SHOP} and pick a product and a quantity.\n"
         "2. Send the exact USDT amount shown to the address shown, on <b>BNB Smart Chain (BEP20)</b>.\n"
         "3. Your login is delivered here automatically, usually within a minute.\n\n"
         "The last digits of the amount identify your payment, so always send it exactly. "
-        "Your past orders are in /orders.\n\n" + support_line()
+        f"Your past orders are in {BTN_ORDERS}.\n\n" + support_line()
     )
 
 
@@ -244,11 +242,11 @@ async def deliver(bot, inv: Row, items: list[str], heading: str = "✅ <b>Paymen
     )
     logins = "\n".join(f"<code>{esc(item)}</code>" for item in items)
     label = "Your logins" if len(items) > 1 else "Your login"
-    text = f"{head}\n\n🔑 <b>{label}:</b>\n{logins}\n\nSaved in /orders in case you need it again."
+    text = f"{head}\n\n🔑 <b>{label}:</b>\n{logins}\n\nSaved in {BTN_ORDERS} in case you need it again."
     if len(text) <= MAX_TEXT:
         await send(bot, inv["user_id"], text)
         return
-    await send(bot, inv["user_id"], f"{head}\n\n🔑 Your logins are in the file below. Also saved in /orders.")
+    await send(bot, inv["user_id"], f"{head}\n\n🔑 Your logins are in the file below. Also saved in {BTN_ORDERS}.")
     try:
         await bot.send_document(inv["user_id"], document="\n".join(items).encode(), filename=f"order-{inv['id']}.txt")
     except TelegramError as exc:
@@ -330,7 +328,7 @@ async def payments_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             context.bot,
             inv,
             f"⌛ <b>Order #{inv['id']} expired.</b>\n\n"
-            "The payment time ran out and the item went back on sale. Already sent the money? Don't worry: "
+            "The payment time ran out. Already sent the money? Don't worry: "
             f"payments are still recognised for {payments.LATE_MINUTES // 60} more hours and delivered "
             "automatically while in stock.",
             SHOP_BUTTON,
@@ -348,8 +346,36 @@ BUY_ERRORS = {
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await", None)
+    await update.effective_message.reply_text(
+        f"👋 Welcome to <b>{esc(CFG.store_name)}</b>! The buttons below are always here.",
+        reply_markup=menu_keyboard(update.effective_user.id),
+    )
     text, markup = await shop_screen()
     await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Any text: a bottom-menu button, an answer the admin was asked for, or else the shop."""
+    user = update.effective_user
+    text = (update.effective_message.text or "").strip()
+    is_admin = user.id in CFG.admin_ids
+    if text in (BTN_SHOP, BTN_ORDERS, BTN_HELP, BTN_ADMIN) or text.startswith("/"):
+        context.user_data.pop("await", None)  # a menu tap or command abandons a pending question
+    elif is_admin and context.user_data.get("await"):
+        await admin_input(update, context, update.effective_message.text)
+        return
+    if text == BTN_SHOP:
+        shop_text, markup = await shop_screen()
+        await update.effective_message.reply_text(shop_text, reply_markup=markup)
+    elif text == BTN_ORDERS:
+        await show_orders(context.bot, user.id)
+    elif text == BTN_HELP:
+        await cmd_help(update, context)
+    elif text == BTN_ADMIN and is_admin:
+        await cmd_admin(update, context)
+    else:
+        await cmd_start(update, context)
 
 
 async def cb_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -469,7 +495,7 @@ async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def show_orders(bot, user_id: int) -> None:
     orders = await DB.orders(user_id)
     if not orders:
-        await send(bot, user_id, "📦 No orders yet. Tap /start to shop.")
+        await send(bot, user_id, f"📦 No orders yet. Tap {BTN_SHOP} to buy something.")
         return
     blocks = []
     for inv, items in orders:
@@ -517,53 +543,202 @@ async def cb_outdated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send(context.bot, update.effective_user.id, text, reply_markup=markup)
 
 
-# ---- admin handlers (only reachable by ADMIN_IDS, enforced by the handler filters) ------------
+# ---- admin: buttons under 🛠 Admin, plus the same actions as slash commands ------------------
+# Messages are limited to ADMIN_IDS by the handler filters; admin buttons check it themselves.
 
-ADMIN_HELP = (
-    "<b>Commands</b>\n"
-    "/add Name | price: new product\n"
-    "/stock ID, then one login per line below it (or a .txt file with caption <code>/stock ID</code>)\n"
-    "/price ID price: change a price\n"
-    "/clear ID: delete a product's unsold logins\n"
-    "/del ID: remove a product"
-)
 STOCK_USAGE = (
     "Put the logins below the command, one per line:\n"
     "<pre>/stock 1\nemail1:password1\nemail2:password2</pre>\n"
-    "Or send a .txt file (one login per line) with the caption <code>/stock 1</code>."
+    "Or tap 🛠 Admin → the product → ➕ Add logins."
+)
+NEW_PRODUCT_PROMPT = (
+    "➕ <b>New product</b>\n\nSend its name and price, separated by <code>|</code>:\n"
+    "<code>Netflix Premium 1 Month | 4.99</code>"
 )
 
 
-async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def one_button(label: str, data: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)]])
+
+
+def confirm_markup(yes: str, no: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ Yes", callback_data=yes), InlineKeyboardButton("⬅️ No", callback_data=no)]]
+    )
+
+
+def stock_prompt(p: Row) -> str:
+    return (
+        f"➕ <b>Add logins to {esc(p['name'])}</b>\n\n"
+        "Send them in one message, one login per line:\n"
+        "<pre>email1:password1\nemail2:password2</pre>\n"
+        "Or send a .txt file with one login per line."
+    )
+
+
+def parse_product(text: str) -> tuple[str, int | None]:
+    """'Netflix 1 Month | 4.99' -> ('Netflix 1 Month', 499); price None if it doesn't parse."""
+    name, sep, price_text = text.rpartition("|")
+    name = " ".join(name.split())
+    price = parse_price(price_text) if sep else None
+    return name, price if name and len(name) <= 64 else None
+
+
+async def admin_home() -> tuple[str, InlineKeyboardMarkup]:
     products = await DB.products()
     s = await DB.summary()
-    lines = ["🛠 <b>Admin</b>", ""]
-    lines += [
-        f"#{p['id']} {esc(p['name'])}: {usd(p['price_cents'])} · {p['in_stock']} in stock · {p['sold']} sold"
+    text = (
+        "🛠 <b>Admin</b>\n\n"
+        f"🧾 Open orders: {s['open_orders']} · Waiting for stock: {s['backorders']}\n"
+        f"💰 Last 24h: {s['sales']} sales · {payments.usdt(s['units'])} USDT\n\n"
+        + ("Tap a product to add logins, change its price or remove it." if products else "No products yet. Add one 👇")
+    )
+    rows = [[InlineKeyboardButton("➕ New product", callback_data="a:new")]]
+    rows += [
+        [InlineKeyboardButton(f"{p['name']} · {usd(p['price_cents'])} · {p['in_stock']} left", callback_data=f"a:p:{p['id']}")]
         for p in products
-    ] or ["No products yet."]
-    lines += [
-        "",
-        f"Open orders: {s['open_orders']} · Paid, waiting for stock: {s['backorders']}",
-        f"Last 24h: {s['sales']} sales · {payments.usdt(s['units'])} USDT",
-        "",
-        ADMIN_HELP,
     ]
-    await send_long(context.bot, update.effective_chat.id, "\n".join(lines))
+    return text, InlineKeyboardMarkup(rows)
+
+
+def admin_product_screen(p: Row) -> tuple[str, InlineKeyboardMarkup]:
+    pid = p["id"]
+    text = (
+        f"🛠 <b>{esc(p['name'])}</b> (#{pid})\n\n"
+        f"💵 Price: {usd(p['price_cents'])}\n"
+        f"📦 In stock: {p['in_stock']} · Sold: {p['sold']}"
+    )
+    markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("➕ Add logins", callback_data=f"a:stock:{pid}"),
+                InlineKeyboardButton("💲 Change price", callback_data=f"a:price:{pid}"),
+            ],
+            [
+                InlineKeyboardButton("🗑 Delete unsold", callback_data=f"a:clear:{pid}"),
+                InlineKeyboardButton("❌ Remove", callback_data=f"a:del:{pid}"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data="a:home")],
+        ]
+    )
+    return text, markup
+
+
+async def reply_product_screen(update: Update, product_id: int) -> None:
+    """After an admin action, show that product's buttons again so the next step is one tap."""
+    p = await DB.product(product_id)
+    if p is not None:
+        text, markup = admin_product_screen(p)
+        await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("await", None)
+    text, markup = await admin_home()
+    await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if q.from_user.id not in CFG.admin_ids:
+        await q.answer("Admins only.", show_alert=True)
+        return
+    _, action, *rest = q.data.split(":")
+    context.user_data.pop("await", None)  # any admin button abandons a pending question
+    if action == "new":
+        context.user_data["await"] = ("new", 0)
+        await q.answer()
+        await edit(q, NEW_PRODUCT_PROMPT, one_button("✖️ Cancel", "a:home"))
+        return
+    p = await DB.product(int(rest[0])) if rest else None
+    if p is None:  # "home", or a product that was removed meanwhile
+        await q.answer("That product no longer exists." if rest else None)
+        text, markup = await admin_home()
+        await edit(q, text, markup)
+        return
+    pid, name, back = p["id"], esc(p["name"]), f"a:p:{p['id']}"
+    if action == "stock":
+        context.user_data["await"] = ("stock", pid)
+        await q.answer()
+        await edit(q, stock_prompt(p), one_button("✖️ Cancel", back))
+    elif action == "price":
+        context.user_data["await"] = ("price", pid)
+        await q.answer()
+        await edit(
+            q,
+            f"💲 <b>New price for {name}</b>\n\nNow {usd(p['price_cents'])}. Send the new price, e.g. <code>5.99</code>",
+            one_button("✖️ Cancel", back),
+        )
+    elif action == "clear":
+        await q.answer()
+        await edit(
+            q, f"🗑 Delete all {p['in_stock']} unsold login(s) of <b>{name}</b>?", confirm_markup(f"a:clear_yes:{pid}", back)
+        )
+    elif action == "del":
+        await q.answer()
+        await edit(
+            q,
+            f"❌ Remove <b>{name}</b> from the shop? Its {p['in_stock']} unsold login(s) are deleted too.",
+            confirm_markup(f"a:del_yes:{pid}", back),
+        )
+    elif action == "clear_yes":
+        removed = await DB.clear_stock(pid)
+        await q.answer(f"Deleted {removed} unsold login(s).")
+        text, markup = admin_product_screen(await DB.product(pid))
+        await edit(q, text, markup)
+    elif action == "del_yes":
+        await DB.delete_product(pid)
+        await q.answer("Product removed.")
+        text, markup = await admin_home()
+        await edit(q, text, markup)
+    else:  # "p": the product's own screen
+        await q.answer()
+        text, markup = admin_product_screen(p)
+        await edit(q, text, markup)
+
+
+async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """The admin's reply to the question an admin button asked: a new product, logins or a price."""
+    kind, product_id = context.user_data["await"]
+    msg = update.effective_message
+    if kind == "new":
+        name, price = parse_product(text)
+        if price is None:
+            await msg.reply_text(
+                "Send it like this: <code>Netflix Premium 1 Month | 4.99</code>", reply_markup=one_button("✖️ Cancel", "a:home")
+            )
+            return
+        product_id = await DB.add_product(name, price)
+        context.user_data["await"] = ("stock", product_id)  # straight on to its logins
+        await msg.reply_text(
+            f"✅ Added <b>{esc(name)}</b> at {usd(price)}.\n\n" + stock_prompt(await DB.product(product_id)),
+            reply_markup=one_button("⏭ Add logins later", f"a:p:{product_id}"),
+        )
+    elif kind == "stock":
+        context.user_data.pop("await", None)
+        if await add_stock(update, context, product_id, text.splitlines()):
+            await reply_product_screen(update, product_id)
+    elif kind == "price":
+        price = parse_price(text)
+        if price is None:
+            await msg.reply_text(
+                "Send just the price, e.g. <code>5.99</code>", reply_markup=one_button("✖️ Cancel", f"a:p:{product_id}")
+            )
+            return
+        context.user_data.pop("await", None)
+        if await DB.set_price(product_id, price):
+            await msg.reply_text(f"✅ New price: {usd(price)}.")
+        await reply_product_screen(update, product_id)
 
 
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    name, sep, price_text = command_body(update.effective_message.text).rpartition("|")
-    name = " ".join(name.split())
-    price = parse_price(price_text) if sep else None
-    if not name or len(name) > 64 or price is None:
+    name, price = parse_product(command_body(update.effective_message.text))
+    if price is None:
         await update.effective_message.reply_text("Usage: <code>/add Netflix Premium 1 Month | 4.99</code>")
         return
     product_id = await DB.add_product(name, price)
-    await update.effective_message.reply_text(
-        f"✅ Added product #{product_id} <b>{esc(name)}</b> at {usd(price)}.\n\n"
-        f"Now add its logins, one per line:\n<pre>/stock {product_id}\nemail1:password1\nemail2:password2</pre>"
-    )
+    await update.effective_message.reply_text(f"✅ Added product #{product_id} <b>{esc(name)}</b> at {usd(price)}.")
+    await reply_product_screen(update, product_id)
 
 
 async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -573,15 +748,23 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if product_id is None:
         await update.effective_message.reply_text(STOCK_USAGE)
         return
-    await add_stock(update, context, product_id, [inline_item, *rest.splitlines()])
+    if await add_stock(update, context, product_id, [inline_item, *rest.splitlines()]):
+        await reply_product_screen(update, product_id)
 
 
 async def on_stock_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A .txt of logins: for the product the admin is adding logins to, or `/stock ID` as caption."""
     msg = update.effective_message
-    product_id = int_arg(command_body(msg.caption).split()[0])
-    if product_id is None:
-        await msg.reply_text(STOCK_USAGE)
+    pending = context.user_data.get("await")
+    caption = re.match(r"^/stock(?:@\w+)?\s+([0-9]{1,9})", msg.caption or "")
+    if caption:
+        product_id = int(caption.group(1))
+    elif pending and pending[0] == "stock":
+        product_id = pending[1]
+    else:
+        await msg.reply_text("To add logins from a file: 🛠 Admin → the product → ➕ Add logins, then send the file.")
         return
+    context.user_data.pop("await", None)
     if msg.document.file_size and msg.document.file_size > 2_000_000:
         await msg.reply_text("That file is too big (max 2 MB).")
         return
@@ -591,27 +774,29 @@ async def on_stock_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except UnicodeDecodeError:
         await msg.reply_text("The file must be plain UTF-8 text, one login per line.")
         return
-    await add_stock(update, context, product_id, text.splitlines())
+    if await add_stock(update, context, product_id, text.splitlines()):
+        await reply_product_screen(update, product_id)
 
 
-async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id: int, lines: list[str]) -> None:
+async def add_stock(update: Update, context: ContextTypes.DEFAULT_TYPE, product_id: int, lines: list[str]) -> bool:
     msg = update.effective_message
     items = [line.strip() for line in lines if line.strip()]
     if not items:
         await msg.reply_text(STOCK_USAGE)
-        return
+        return False
     result = await DB.add_stock(product_id, items)
     if result is None:
-        await msg.reply_text(f"There is no product #{product_id}. See /admin.")
-        return
+        await msg.reply_text(f"There is no product #{product_id}. Open 🛠 Admin to see your products.")
+        return False
     added, skipped = result
     note = f" Skipped {skipped} duplicate(s)." if skipped else ""
-    await msg.reply_text(f"✅ Added {added} login(s) to product #{product_id}.{note}")
+    await msg.reply_text(f"✅ Added {added} login(s).{note}")
     delivered = await DB.fulfil_backorders(product_id)
     for inv, got in delivered:
         await deliver(context.bot, inv, got, heading="✅ <b>Back in stock: here is your order!</b>")
     if delivered:
         await msg.reply_text(f"📦 Delivered {len(delivered)} paid order(s) that were waiting for this stock.")
+    return True
 
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -657,7 +842,7 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 USER_COMMANDS = [BotCommand("start", "Shop"), BotCommand("orders", "My orders"), BotCommand("help", "How to buy")]
 ADMIN_COMMANDS = USER_COMMANDS + [
-    BotCommand("admin", "Products, stock and sales"),
+    BotCommand("admin", "Admin panel"),
     BotCommand("add", "Add a product: Name | price"),
     BotCommand("stock", "Add logins to a product"),
     BotCommand("price", "Change a price"),
@@ -727,8 +912,8 @@ def main() -> None:
             CommandHandler("price", cmd_price, filters=admin),
             CommandHandler("clear", cmd_clear, filters=admin),
             CommandHandler("del", cmd_del, filters=admin),
-            MessageHandler(admin & filters.Document.ALL & filters.CaptionRegex(r"^/stock(@\w+)?\s+[0-9]+"), on_stock_file),
-            MessageHandler(private & filters.TEXT, cmd_start),  # anything else shows the shop
+            MessageHandler(admin & filters.Document.ALL, on_stock_file),
+            MessageHandler(private & filters.TEXT, on_text),  # menu buttons, admin answers, else the shop
             CallbackQueryHandler(cb_home, pattern=r"^home$"),
             CallbackQueryHandler(cb_product, pattern=r"^p:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_buy, pattern=r"^b:[0-9]{1,9}:[0-9]{1,2}$"),
@@ -736,6 +921,7 @@ def main() -> None:
             CallbackQueryHandler(cb_cancel, pattern=r"^x:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_orders, pattern=r"^orders$"),
             CallbackQueryHandler(cb_help, pattern=r"^help$"),
+            CallbackQueryHandler(cb_admin, pattern=r"^a:(home|new|(p|stock|price|clear|del|clear_yes|del_yes):[0-9]{1,9})$"),
             CallbackQueryHandler(cb_outdated),
         ]
     )

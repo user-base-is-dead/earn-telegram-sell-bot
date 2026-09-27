@@ -32,7 +32,7 @@ class Config:
     wallet_address: str  # where buyers send USDT (BEP20), exactly as written in .env
     rpc_urls: tuple[str, ...]
     fee_cents: int  # flat fee added to every order
-    payment_minutes: int  # how long an order stays open; its stock is reserved meanwhile
+    payment_minutes: int  # how long an order stays open (stock is not held for it)
     store_name: str
     support_username: str  # without "@"; empty = none
     db_file: Path

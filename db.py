@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS products (
     created_at  INTEGER NOT NULL
 );
 
--- One row per login: available -> reserved (by an open order) -> sold.
+-- One row per login: available until an order is paid, then sold to that order.
 CREATE TABLE IF NOT EXISTS stock (
     id         INTEGER PRIMARY KEY,
     product_id INTEGER NOT NULL REFERENCES products(id),
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS stock (
 CREATE INDEX IF NOT EXISTS ix_stock_product ON stock (product_id, status);
 CREATE INDEX IF NOT EXISTS ix_stock_invoice ON stock (invoice_id);
 
--- status: pending (open, stock reserved) | expired | cancelled | paid | backorder (paid, no stock)
+-- status: pending (open) | expired | cancelled | paid | backorder (paid, but no stock was left)
 CREATE TABLE IF NOT EXISTS invoices (
     id           INTEGER PRIMARY KEY,
     user_id      INTEGER NOT NULL,
@@ -132,27 +132,14 @@ async def _one(conn: aiosqlite.Connection, sql: str, params: Sequence = ()) -> R
         return await cur.fetchone()
 
 
-async def _release(conn: aiosqlite.Connection, invoice_id: int) -> None:
-    """Put an order's reserved logins back on sale."""
-    await conn.execute(
-        "UPDATE stock SET status = 'available', invoice_id = NULL WHERE invoice_id = ? AND status = 'reserved'",
-        (invoice_id,),
-    )
-
-
 async def _take_stock(conn: aiosqlite.Connection, invoice: Row, now: int) -> list[str] | None:
-    """Mark the order's logins sold: the ones it reserved, topped up from free stock if it no
-    longer holds any (it expired or was cancelled before the money arrived). None if short."""
+    """Mark `qty` free logins of the order's product sold to it. None (and nothing changes) if
+    there aren't enough: stock is only ever taken by a payment, never by opening an order."""
     rows = await _all(
-        conn, "SELECT id, content FROM stock WHERE invoice_id = ? AND status = 'reserved' ORDER BY id", (invoice["id"],)
+        conn,
+        "SELECT id, content FROM stock WHERE product_id = ? AND status = 'available' ORDER BY id LIMIT ?",
+        (invoice["product_id"], invoice["qty"]),
     )
-    need = invoice["qty"] - len(rows)
-    if need > 0:
-        rows += await _all(
-            conn,
-            "SELECT id, content FROM stock WHERE product_id = ? AND status = 'available' ORDER BY id LIMIT ?",
-            (invoice["product_id"], need),
-        )
     if len(rows) < invoice["qty"]:
         return None
     await conn.executemany(
@@ -176,6 +163,9 @@ class Database:
         for pragma in ("journal_mode=WAL", "foreign_keys=ON", "busy_timeout=5000", "synchronous=NORMAL"):
             await self._conn.execute(f"PRAGMA {pragma}")
         await self._conn.executescript(SCHEMA)
+        # Earlier versions held stock for open orders. Stock is only taken by a payment now, so
+        # anything still held from before goes straight back on sale.
+        await self._conn.execute("UPDATE stock SET status = 'available', invoice_id = NULL WHERE status = 'reserved'")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -271,11 +261,12 @@ class Database:
         max_per_hour: int,
         pick_amount: AmountPicker,
     ) -> tuple[str, Row | None]:
-        """Open an order: reserve its logins and give it an amount no other payable order has.
+        """Open an order with an amount that no other payable order has. Its logins stay on sale:
+        they are only taken when the payment arrives, by whoever pays first.
 
         Returns (outcome, order). Outcomes: 'created'; 'open' (the buyer already has an open order,
         which is returned); 'rate' (too many orders this hour); 'gone' (no such product);
-        'stock' (not enough stock); 'busy' (every amount for this price is taken right now).
+        'stock' (not enough stock right now); 'busy' (every amount for this price is taken).
         """
         now = _now()
         async with self.tx() as conn:
@@ -290,12 +281,10 @@ class Database:
             product = await _one(conn, "SELECT price_cents FROM products WHERE id = ? AND active = 1", (product_id,))
             if product is None:
                 return "gone", None
-            items = await _all(
-                conn,
-                "SELECT id FROM stock WHERE product_id = ? AND status = 'available' ORDER BY id LIMIT ?",
-                (product_id, qty),
+            available = await _one(
+                conn, "SELECT COUNT(*) FROM stock WHERE product_id = ? AND status = 'available'", (product_id,)
             )
-            if len(items) < qty:
+            if available[0] < qty:
                 return "stock", None
             recent_rows = await _all(conn, "SELECT amount_units FROM invoices WHERE created_at >= ?", (now - reserve_seconds,))
             taken = {r[0] for r in recent_rows}
@@ -307,11 +296,7 @@ class Database:
                 " VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
                 (user_id, buyer, product_id, qty, amount, now, now + pay_seconds),
             )
-            invoice_id = cur.lastrowid
-            await conn.executemany(
-                "UPDATE stock SET status = 'reserved', invoice_id = ? WHERE id = ?", [(invoice_id, r["id"]) for r in items]
-            )
-            return "created", await _one(conn, INVOICE_SQL + " WHERE i.id = ?", (invoice_id,))
+            return "created", await _one(conn, INVOICE_SQL + " WHERE i.id = ?", (cur.lastrowid,))
 
     async def invoice(self, invoice_id: int) -> Row | None:
         return await self._read_one(INVOICE_SQL + " WHERE i.id = ?", (invoice_id,))
@@ -321,25 +306,21 @@ class Database:
             await conn.execute("UPDATE invoices SET message_id = ? WHERE id = ?", (message_id, invoice_id))
 
     async def cancel_invoice(self, invoice_id: int, user_id: int) -> bool:
-        """Close the buyer's own open order and put its logins back on sale. An order that was paid
-        a moment ago is never cancelled out from under its buyer."""
+        """Close the buyer's own open order. An order that was paid a moment ago is never cancelled
+        out from under its buyer."""
         async with self.tx() as conn:
             cur = await conn.execute(
                 "UPDATE invoices SET status = 'cancelled' WHERE id = ? AND user_id = ? AND status = 'pending'",
                 (invoice_id, user_id),
             )
-            if cur.rowcount != 1:
-                return False
-            await _release(conn, invoice_id)
-            return True
+            return cur.rowcount == 1
 
     async def expire_invoices(self, grace: int) -> list[Row]:
-        """Close open orders whose time ran out (plus `grace` seconds); their logins go back on sale."""
+        """Close open orders whose time ran out (plus `grace` seconds)."""
         async with self.tx() as conn:
             rows = await _all(conn, INVOICE_SQL + " WHERE i.status = 'pending' AND i.expires_at + ? < ?", (grace, _now()))
             for r in rows:
                 await conn.execute("UPDATE invoices SET status = 'expired' WHERE id = ?", (r["id"],))
-                await _release(conn, r["id"])
             return rows
 
     async def items_of(self, invoice_id: int) -> list[str]:
@@ -442,9 +423,7 @@ class Database:
             if invoice is None:
                 return Settlement(note, candidate_ids=[f["id"] for f in fits])
 
-            items = await _take_stock(conn, invoice, now)
-            if items is None:
-                await _release(conn, invoice["id"])
+            items = await _take_stock(conn, invoice, now)  # None: sold out to earlier payers -> backorder
             await conn.execute(
                 "UPDATE invoices SET status = ?, paid_at = ?, tx_hash = ?, paid_raw = ? WHERE id = ?",
                 ("paid" if items is not None else "backorder", now, t.tx_hash, str(t.value_raw), invoice["id"]),
