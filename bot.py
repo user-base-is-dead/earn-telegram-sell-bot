@@ -11,6 +11,7 @@ import csv
 import html
 import io
 import logging
+import random
 import re
 import sys
 import time
@@ -28,7 +29,7 @@ from telegram import (
     User,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, InvalidToken, TelegramError
+from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -369,11 +370,16 @@ async def describe_action(update: Update) -> str:
     """A short, human description of what a user just did."""
     if update.callback_query is not None:
         kind, _, rest = (update.callback_query.data or "").partition(":")
-        if kind in ("p", "b", "q"):
+        if kind in ("p", "b", "q", "n"):
             pid, _, qty = rest.partition(":")
             product = await DB.product(int(pid)) if pid.isdigit() and len(pid) <= 9 else None
             name = product["name"] if product is not None else f"product #{pid}"
-            return {"p": f"viewed {name}", "b": f"chose to buy {qty} × {name}", "q": f"entering a quantity for {name}"}[kind]
+            return {
+                "p": f"viewed {name}",
+                "b": f"chose to buy {qty} × {name}",
+                "q": f"entering a quantity for {name}",
+                "n": f"tapped Buy now on {name}",
+            }[kind]
         return {
             "home": "opened the shop",
             "orders": "opened My orders",
@@ -404,6 +410,113 @@ async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await DB.touch_user(user.id, user.username, user.full_name, await describe_action(update))
     except Exception:  # never let bookkeeping get in the way of serving the user
         log.exception("Could not record user %s", user.id)
+
+
+# ---- stock announcements and admin broadcasts -------------------------------------------------
+
+ANNOUNCE_HEADLINES = (
+    "🔥 <b>{name}</b> is in stock!",
+    "⚡ <b>Available now:</b> {name}",
+    "🛍 <b>Ready for instant delivery:</b> {name}",
+    "✅ <b>In stock:</b> {name}",
+)
+BROADCAST_LOCK = asyncio.Lock()  # one mass send at a time keeps the bot under Telegram's rate limit
+_next_announcement = 0.0  # unix time of the next automatic announcement (0 = none scheduled)
+
+
+def buy_now_markup(product_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Buy now", callback_data=f"n:{product_id}")]])
+
+
+async def send_to_everyone(send_one) -> tuple[int, int]:
+    """Call `send_one(user_id)` for every user who hasn't blocked the bot, about 20 a second.
+    Returns (sent, failed). Users who blocked the bot are remembered and skipped from then on."""
+    sent = failed = 0
+    async with BROADCAST_LOCK:
+        for user_id in await DB.recipients(exclude=CFG.admin_ids):
+            for _ in range(3):
+                try:
+                    await send_one(user_id)
+                    sent += 1
+                    break
+                except RetryAfter as exc:  # Telegram asked us to slow down
+                    wait = exc.retry_after
+                    await asyncio.sleep((wait.total_seconds() if hasattr(wait, "total_seconds") else float(wait)) + 1)
+                except Forbidden:  # they blocked the bot or deleted their account
+                    await DB.set_blocked(user_id)
+                    failed += 1
+                    break
+                except TelegramError as exc:
+                    log.warning("Could not reach %s: %s", user_id, exc)
+                    failed += 1
+                    break
+            else:
+                failed += 1
+            await asyncio.sleep(0.05)
+    return sent, failed
+
+
+def announcement_text(p: Row) -> str:
+    headline = random.choice(ANNOUNCE_HEADLINES).format(name=esc(p["name"]))
+    return (
+        f"{headline}\n\n"
+        f"💵 <b>{usd(p['price_cents'])}</b> each · 📦 <b>{p['in_stock']}</b> left\n"
+        "⚡ Pay with USDT (BEP20) and your login arrives here automatically."
+    )
+
+
+async def announce_product(bot) -> tuple[Row | None, int, int]:
+    """Announce one random in-stock product to everyone (not the same one twice in a row)."""
+    in_stock = [p for p in await DB.products() if p["in_stock"] > 0]
+    if not in_stock:
+        return None, 0, 0
+    last = await DB.get_setting("announce_last")
+    p = random.choice([x for x in in_stock if str(x["id"]) != last] or in_stock)
+    text, markup = announcement_text(p), buy_now_markup(p["id"])
+    sent, failed = await send_to_everyone(lambda user_id: bot.send_message(user_id, text, reply_markup=markup))
+    await DB.set_setting("announce_last", str(p["id"]))
+    await DB.set_setting("announce_last_at", str(int(time.time())))
+    log.info("Announced %s to %d users (%d failed)", p["name"], sent, failed)
+    return p, sent, failed
+
+
+def schedule_announcement(job_queue) -> None:
+    global _next_announcement
+    low, high = CFG.announce_minutes
+    delay = random.randint(low * 60, high * 60)
+    _next_announcement = time.time() + delay
+    job_queue.run_once(announce_job, when=delay, name="announce")
+
+
+async def announce_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if await DB.get_setting("announce", "on") == "on":
+            await announce_product(context.bot)
+    finally:
+        schedule_announcement(context.job_queue)  # a random gap every time
+
+
+async def announce_status() -> str:
+    if CFG.announce_minutes is None:
+        return "📣 Auto announce: off (ANNOUNCE_MINUTES=0 in .env)"
+    on = await DB.get_setting("announce", "on") == "on"
+    line = f"📣 Auto announce: <b>{'ON' if on else 'OFF'}</b>"
+    if on and _next_announcement:
+        line += f" · next in ~{max(1, int(_next_announcement - time.time()) // 60)}m"
+    last_at = await DB.get_setting("announce_last_at")
+    return line + (f" · last {ago(int(last_at))}" if last_at else "")
+
+
+async def cb_buy_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🛒 Buy now under an announcement or broadcast: open that product as a new message."""
+    q = update.callback_query
+    product = await DB.product(int(q.data.split(":")[1]))
+    if product is None or product["in_stock"] < 1:
+        await q.answer("Sorry, it's sold out right now." if product else "This product is no longer available.", show_alert=True)
+        return
+    await q.answer()
+    text, markup = product_screen(product)
+    await send(context.bot, q.from_user.id, text, reply_markup=markup)
 
 
 # ---- buyer handlers ---------------------------------------------------------------------------
@@ -719,15 +832,23 @@ async def admin_home() -> tuple[str, InlineKeyboardMarkup]:
         "🛠 <b>Admin</b>\n\n"
         f"🧾 Open orders: {s['open_orders']} · Waiting for stock: {s['backorders']}\n"
         f"💰 Last 24h: {s['sales']} sales · {payments.usdt(s['units'])} USDT\n"
-        f"👥 Users: {u['total']} total · {u['active']} active in the last 24h\n\n"
+        f"👥 Users: {u['total']} total · {u['active']} active in the last 24h\n"
+        f"{await announce_status()}\n\n"
         + ("Tap a product to add logins, change its price or remove it." if products else "No products yet. Add one 👇")
     )
     rows = [
         [
             InlineKeyboardButton("➕ New product", callback_data="a:new"),
             InlineKeyboardButton("👥 Users", callback_data="a:users"),
-        ]
+        ],
+        [
+            InlineKeyboardButton("📢 Broadcast", callback_data="a:bc"),
+            InlineKeyboardButton("🎲 Announce now", callback_data="a:ann_now"),
+        ],
     ]
+    if CFG.announce_minutes is not None:
+        on = await DB.get_setting("announce", "on") == "on"
+        rows.append([InlineKeyboardButton(f"📣 Turn auto announce {'OFF' if on else 'ON'}", callback_data="a:ann_toggle")])
     rows += [
         [InlineKeyboardButton(f"{p['name']} · {usd(p['price_cents'])} · {p['in_stock']} left", callback_data=f"a:p:{p['id']}")]
         for p in products
@@ -780,6 +901,7 @@ async def users_screen() -> tuple[str, InlineKeyboardMarkup]:
         block = (
             f"\n{n}. <a href=\"tg://user?id={u['id']}\">{esc(u['name'])}</a>{handle} · <code>{u['id']}</code>\n"
             f"🕒 {ago(u['last_seen'])} · 👆 {u['clicks']} clicks · 🛒 {u['orders']} paid orders"
+            + (" · 🚫 blocked the bot" if u["blocked"] else "")
         )
         if u["last_action"]:
             block += f"\n↳ {esc(u['last_action'])}"
@@ -837,6 +959,9 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _, action, *rest = q.data.split(":")
     context.user_data.pop("await", None)  # any admin button abandons a pending question
+    if action in ("bc", "bc_p", "bc_send", "ann_now", "ann_toggle"):
+        await admin_broadcast_button(q, context, action, int(rest[0]) if rest else 0)
+        return
     if action == "users":
         await q.answer()
         text, markup = await users_screen()
@@ -902,6 +1027,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
     """The admin's reply to the question an admin button asked: a new product, logins or a price."""
     kind, product_id = context.user_data["await"]
     msg = update.effective_message
+    if kind == "broadcast":
+        await broadcast_input(update, context)
+        return
     if kind == "new":
         name, price = parse_product(text)
         if price is None:
@@ -932,6 +1060,108 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         await reply_product_screen(update, product_id)
 
 
+BROADCAST_PROMPT = (
+    "📢 <b>Broadcast</b>\n\n"
+    "Send the message for all <b>{count}</b> users: text, or a photo / video with a caption. "
+    "Formatting is kept exactly as you write it.\n\n"
+    "Next you can attach a product, so a <b>🛒 Buy now</b> button appears under it."
+)
+
+
+async def admin_broadcast_button(q, context: ContextTypes.DEFAULT_TYPE, action: str, arg: int) -> None:
+    """📢 Broadcast (write → attach a product → preview → send) and the 📣 announcement buttons."""
+    admin_id = q.from_user.id
+    if action == "bc":
+        context.user_data["await"] = ("broadcast", 0)
+        await q.answer()
+        count = len(await DB.recipients(exclude=CFG.admin_ids))
+        await edit(q, BROADCAST_PROMPT.format(count=count), one_button("✖️ Cancel", "a:home"))
+    elif action == "bc_p":  # product picked (0 = none): show the admin exactly what users will get
+        draft = context.user_data.get("broadcast")
+        if not draft:
+            await q.answer("Start again with 📢 Broadcast.", show_alert=True)
+            return
+        product = await DB.product(arg) if arg else None
+        draft["product"] = product["id"] if product is not None else None
+        await q.answer()
+        markup = buy_now_markup(product["id"]) if product is not None else None
+        try:
+            await context.bot.copy_message(admin_id, draft["chat"], draft["msg"], reply_markup=markup)
+        except TelegramError as exc:
+            await send(context.bot, admin_id, f"Couldn't prepare that message ({esc(str(exc))}). Start again with 📢 Broadcast.")
+            return
+        count = len(await DB.recipients(exclude=CFG.admin_ids))
+        await send(
+            context.bot,
+            admin_id,
+            f"👆 <b>Preview.</b> Send it to <b>{count}</b> user(s)?",
+            reply_markup=confirm_markup("a:bc_send", "a:home"),
+        )
+    elif action == "bc_send":
+        draft = context.user_data.pop("broadcast", None)
+        if not draft:
+            await q.answer("Already sent, or nothing to send.", show_alert=True)
+            return
+        await q.answer("Sending…")
+        await edit(q, "📢 <b>Sending…</b> You'll get a message when it's done.")
+        context.application.create_task(run_broadcast(context.bot, admin_id, draft))
+    elif action == "ann_now":
+        await q.answer("Announcing a random product…")
+        context.application.create_task(announce_now(context.bot, admin_id))
+    else:  # ann_toggle
+        on = await DB.get_setting("announce", "on") == "on"
+        await DB.set_setting("announce", "off" if on else "on")
+        await q.answer(f"Auto announce is now {'OFF' if on else 'ON'}.")
+        text, markup = await admin_home()
+        await edit(q, text, markup)
+
+
+async def broadcast_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The admin sent the message to broadcast: keep it, then ask which product to attach."""
+    msg = update.effective_message
+    context.user_data.pop("await", None)
+    context.user_data["broadcast"] = {"chat": msg.chat_id, "msg": msg.message_id, "product": None}
+    rows = [
+        [InlineKeyboardButton(f"🛒 {p['name']}", callback_data=f"a:bc_p:{p['id']}")]
+        for p in await DB.products()
+        if p["in_stock"] > 0
+    ]
+    rows.append([InlineKeyboardButton("➡️ No product, just the message", callback_data="a:bc_p:0")])
+    rows.append([InlineKeyboardButton("✖️ Cancel", callback_data="a:home")])
+    await msg.reply_text(
+        "📎 <b>Attach a product?</b>\nIts <b>🛒 Buy now</b> button goes under your message.",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def on_admin_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A photo / video / GIF from an admin: only meaningful as a broadcast."""
+    pending = context.user_data.get("await")
+    if pending and pending[0] == "broadcast":
+        await broadcast_input(update, context)
+
+
+async def run_broadcast(bot, admin_id: int, draft: dict) -> None:
+    markup = buy_now_markup(draft["product"]) if draft.get("product") else None
+    sent, failed = await send_to_everyone(
+        lambda user_id: bot.copy_message(user_id, draft["chat"], draft["msg"], reply_markup=markup)
+    )
+    note = f" {failed} couldn't be reached (usually: they blocked the bot)." if failed else ""
+    log.info("Broadcast sent to %d users (%d failed)", sent, failed)
+    text = f"📢 <b>Broadcast done.</b> Sent to {sent} user(s).{note}"
+    await send(bot, admin_id, text, reply_markup=one_button(BTN_ADMIN, "a:home"))
+
+
+async def announce_now(bot, admin_id: int) -> None:
+    p, sent, failed = await announce_product(bot)
+    if p is None:
+        text = "📣 Nothing to announce: no product is in stock."
+    else:
+        note = f" {failed} couldn't be reached." if failed else ""
+        text = f"📣 Announced <b>{esc(p['name'])}</b> to {sent} user(s).{note}"
+    await send(bot, admin_id, text, reply_markup=one_button(BTN_ADMIN, "a:home"))
+
+
 async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     name, price = parse_product(command_body(update.effective_message.text))
     if price is None:
@@ -957,6 +1187,9 @@ async def on_stock_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """A .txt of logins: for the product the admin is adding logins to, or `/stock ID` as caption."""
     msg = update.effective_message
     pending = context.user_data.get("await")
+    if pending and pending[0] == "broadcast":  # a file to broadcast, not logins
+        await broadcast_input(update, context)
+        return
     caption = re.match(r"^/stock(?:@\w+)?\s+([0-9]{1,9})", msg.caption or "")
     if caption:
         product_id = int(caption.group(1))
@@ -1061,6 +1294,8 @@ async def on_startup(app: Application) -> None:
         except TelegramError as exc:
             log.warning("Admin commands not set for %s (has this admin started the bot?): %s", admin_id, exc)
     app.job_queue.run_repeating(payments_job, interval=payments.POLL_SECONDS, first=2, name="payments")
+    if CFG.announce_minutes is not None:
+        schedule_announcement(app.job_queue)
     log.info("@%s is running. Watching %s for USDT (BEP20).", app.bot.username, CFG.wallet_address)
 
 
@@ -1115,17 +1350,21 @@ def main() -> None:
             CommandHandler("clear", cmd_clear, filters=admin),
             CommandHandler("del", cmd_del, filters=admin),
             MessageHandler(admin & filters.Document.ALL, on_stock_file),
+            MessageHandler(admin & (filters.PHOTO | filters.VIDEO | filters.ANIMATION), on_admin_media),
             MessageHandler(private & filters.TEXT, on_text),  # menu buttons, admin answers, else the shop
             CallbackQueryHandler(cb_home, pattern=r"^home$"),
             CallbackQueryHandler(cb_product, pattern=r"^p:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_buy, pattern=r"^b:[0-9]{1,9}:[0-9]{1,3}$"),
             CallbackQueryHandler(cb_quantity, pattern=r"^q:[0-9]{1,9}$"),
+            CallbackQueryHandler(cb_buy_now, pattern=r"^n:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_check, pattern=r"^c:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_cancel, pattern=r"^x:[0-9]{1,9}$"),
             CallbackQueryHandler(cb_orders, pattern=r"^orders$"),
             CallbackQueryHandler(cb_help, pattern=r"^help$"),
             CallbackQueryHandler(
-                cb_admin, pattern=r"^a:(home|new|users|users_file|(p|stock|price|clear|del|clear_yes|del_yes):[0-9]{1,9})$"
+                cb_admin,
+                pattern=r"^a:(home|new|users|users_file|bc|bc_send|ann_now|ann_toggle"
+                r"|(p|stock|price|clear|del|clear_yes|del_yes|bc_p):[0-9]{1,9})$",
             ),
             CallbackQueryHandler(cb_outdated),
         ]

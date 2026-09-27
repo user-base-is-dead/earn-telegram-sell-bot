@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS kv (
     value TEXT NOT NULL
 );
 
--- Everyone who has used the bot, for the admin's 👥 Users list.
+-- Everyone who has used the bot, for the admin's 👥 Users list and for announcements.
 CREATE TABLE IF NOT EXISTS users (
     id          INTEGER PRIMARY KEY,  -- Telegram user id
     username    TEXT,
@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS users (
     first_seen  INTEGER NOT NULL,
     last_seen   INTEGER NOT NULL,
     clicks      INTEGER NOT NULL DEFAULT 0,
-    last_action TEXT
+    last_action TEXT,
+    blocked     INTEGER NOT NULL DEFAULT 0  -- 1 once a message to them fails because they blocked the bot
 );
 CREATE INDEX IF NOT EXISTS ix_users_last_seen ON users (last_seen);
 """
@@ -178,6 +179,9 @@ class Database:
         # Earlier versions held stock for open orders. Stock is only taken by a payment now, so
         # anything still held from before goes straight back on sale.
         await self._conn.execute("UPDATE stock SET status = 'available', invoice_id = NULL WHERE status = 'reserved'")
+        columns = {row[1] for row in await _all(self._conn, "PRAGMA table_info(users)")}
+        if "blocked" not in columns:  # databases created before announcements existed
+            await self._conn.execute("ALTER TABLE users ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0")
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -386,8 +390,27 @@ class Database:
                 "INSERT INTO users (id, username, name, first_seen, last_seen, clicks, last_action)"
                 " VALUES (?, ?, ?, ?, ?, 1, ?)"
                 " ON CONFLICT (id) DO UPDATE SET username = excluded.username, name = excluded.name,"
-                " last_seen = excluded.last_seen, clicks = clicks + 1, last_action = excluded.last_action",
+                " last_seen = excluded.last_seen, clicks = clicks + 1, last_action = excluded.last_action, blocked = 0",
                 (user_id, username, name, now, now, action),
+            )
+
+    async def recipients(self, exclude: Collection[int] = ()) -> list[int]:
+        """Everyone announcements and broadcasts go to: users who haven't blocked the bot."""
+        rows = await self._read_all("SELECT id FROM users WHERE blocked = 0 ORDER BY last_seen DESC")
+        return [r["id"] for r in rows if r["id"] not in exclude]
+
+    async def set_blocked(self, user_id: int) -> None:
+        async with self.tx() as conn:
+            await conn.execute("UPDATE users SET blocked = 1 WHERE id = ?", (user_id,))
+
+    async def get_setting(self, key: str, default: str = "") -> str:
+        row = await self._read_one("SELECT value FROM kv WHERE key = ?", (key,))
+        return row["value"] if row else default
+
+    async def set_setting(self, key: str, value: str) -> None:
+        async with self.tx() as conn:
+            await conn.execute(
+                "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value)
             )
 
     async def users(self, limit: int | None = None) -> list[Row]:

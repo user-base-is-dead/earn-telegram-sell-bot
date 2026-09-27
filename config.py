@@ -37,6 +37,7 @@ class Config:
     support_username: str  # without "@"; empty = none
     db_file: Path
     proxy: str  # optional proxy for reaching Telegram; empty = none
+    announce_minutes: tuple[int, int] | None  # random gap between stock announcements; None = off
 
 
 def _get(name: str, default: str = "") -> str:
@@ -83,6 +84,15 @@ def load() -> Config:
     if not db_file.is_absolute():
         db_file = BASE_DIR / db_file
 
+    announce = _get("ANNOUNCE_MINUTES", "120-240").replace(" ", "")
+    announce_minutes = None
+    if announce not in ("0", "off"):
+        m = re.fullmatch(r"([0-9]{1,5})(?:-([0-9]{1,5}))?", announce)
+        low, high = (int(m.group(1)), int(m.group(2) or m.group(1))) if m else (0, 0)
+        if not 5 <= low <= high <= 10080:
+            raise ConfigError("ANNOUNCE_MINUTES must look like 120-240 (minutes, between 5 and 10080), or 0 for off.")
+        announce_minutes = (low, high)
+
     return Config(
         bot_token=token,
         admin_ids=admin_ids,
@@ -94,4 +104,5 @@ def load() -> Config:
         support_username=_get("SUPPORT_USERNAME").lstrip("@"),
         db_file=db_file,
         proxy=_get("TELEGRAM_PROXY"),
+        announce_minutes=announce_minutes,
     )

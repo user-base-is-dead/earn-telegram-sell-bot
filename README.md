@@ -55,6 +55,12 @@ Admins (`ADMIN_IDS`) also get **🛠 Admin**:
 - **👥 Users** lists everyone who has used the bot: when they were last active, how many times
   they clicked, how many orders they paid and what they did last. **📄 All users** sends the full
   list as a CSV file.
+- **📢 Broadcast**: send any message (text, or a photo / video with a caption) to every user.
+  Optionally attach a product so a **🛒 Buy now** button appears under it; you see a preview
+  before it goes out.
+- **📣 Auto announce**: every so often (a random 2–4 hours, `ANNOUNCE_MINUTES`) one random
+  in-stock product is announced to every user with a **🛒 Buy now** button. Switch it on or off
+  in the panel; **🎲 Announce now** sends one right away. Users who blocked the bot are skipped.
 - The panel also shows open orders, the last 24 hours of sales and how many users were active.
 
 The same actions work as commands too: `/add Name | price`, `/stock ID` with the logins on the
