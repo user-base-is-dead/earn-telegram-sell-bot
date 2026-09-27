@@ -1,29 +1,24 @@
 # Secrets
 .env
+.env.*
+!.env.example
+_old_env_backup/
 
-# Runtime data
+# Runtime data (SQLite database)
 data/
 *.db
-*.sqlite3
-
-# QR temp files
-*.png
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 venv/
-# env/
 
 # IDE / OS
 .vscode/
 .idea/
-# .DS_Store
 Thumbs.db
-
-.superpowers/
-
-# Throwaway local-only admin login helper (do not publish)
-admin/make-session.mjs
+.DS_Store
