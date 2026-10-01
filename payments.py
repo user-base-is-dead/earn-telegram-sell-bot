@@ -50,7 +50,8 @@ POLL_SECONDS = 15  # how often the chain is checked
 LATE_MINUTES = 120  # a payment arriving this long after its order expired is still accepted
 CLOCK_SLACK = 120  # seconds allowed between block timestamps and this machine's clock
 RESCAN_BLOCKS = 200  # every check re-reads this many already-read blocks, in case a node lagged
-LOG_SPAN = 2000  # blocks per eth_getLogs request
+LOG_SPAN = 2000  # preferred blocks per eth_getLogs request (shrunk per endpoint if refused)
+MIN_LOG_SPAN = 25  # smallest span we fall back to for endpoints that cap eth_getLogs ranges
 MAX_SPANS = 10  # eth_getLogs requests per check while catching up after downtime
 
 
@@ -119,13 +120,31 @@ def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:200]
 
 
+# JSON-RPC has no standard code for "your eth_getLogs block range is too wide", so match the
+# message. Seen in the wild: "limit exceeded", "limited to 0 - 50 blocks range", "range must not
+# exceed 25 blocks". A false positive only costs one wasted retry at a smaller span.
+_RANGE_HINTS = ("limit", "range", "exceed", "too many", "too large", "up to")
+
+
+def _is_range_error(exc: Exception) -> bool:
+    return isinstance(exc, RpcError) and any(hint in str(exc).lower() for hint in _RANGE_HINTS)
+
+
 class Chain:
-    """A minimal BSC JSON-RPC client that fails over between endpoints."""
+    """A minimal BSC JSON-RPC client that fails over between endpoints.
+
+    Endpoints differ in how wide an eth_getLogs block range they allow: publicnode serves
+    thousands at once, while some free nodes cap it at 25-50 blocks. The log scan adapts per
+    endpoint -- when a node refuses a span as too wide, that node's span is shrunk and remembered,
+    so capped nodes still work as fallbacks when the preferred ones are blocked (publicnode returns
+    HTTP 403 to some server IPs, and with one provider that stops payments entirely).
+    """
 
     def __init__(self, urls: Sequence[str], wallet: str) -> None:
         self.urls = list(urls)
         self.wallet_topic = "0x" + wallet.lower()[2:].rjust(64, "0")
         self._current = 0
+        self._span = {url: LOG_SPAN for url in self.urls}  # eth_getLogs block span per endpoint
         self._http: httpx.AsyncClient | None = None
 
     async def close(self) -> None:
@@ -133,23 +152,31 @@ class Chain:
             await self._http.aclose()
             self._http = None
 
-    async def _call(self, method: str, params: list):
+    def _advance(self) -> None:
+        self._current = (self._current + 1) % len(self.urls)
+
+    async def _post(self, url: str, method: str, params: list):
+        """One JSON-RPC call to one endpoint. Raises on transport, HTTP, or RPC-level error."""
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=10)
+            self._http = httpx.AsyncClient(timeout=15)
+        resp = await self._http.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("error"):
+            raise RpcError(str(data["error"])[:200])
+        return data["result"]
+
+    async def _call(self, method: str, params: list):
+        """A call that fails over to the next endpoint on any error."""
         problems = []
         for _ in self.urls:
             url = self.urls[self._current]
             try:
-                resp = await self._http.post(url, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("error"):
-                    raise RpcError(str(data["error"])[:200])
-                return data["result"]
+                return await self._post(url, method, params)
             except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError, RpcError) as exc:
                 # Only the host is reported: a keyed endpoint carries its API key in the URL.
                 problems.append(f"{urlsplit(url).hostname}: {_describe(exc)}")
-                self._current = (self._current + 1) % len(self.urls)
+                self._advance()
         raise RpcError(f"{method} failed on every endpoint ({'; '.join(problems)})")
 
     async def head(self) -> int:
@@ -162,14 +189,42 @@ class Chain:
         return int(block["timestamp"], 16)
 
     async def incoming(self, start: int, end: int) -> list[dict]:
-        """USDT Transfer logs into the shop wallet in blocks start..end (inclusive)."""
-        flt = {
-            "fromBlock": hex(start),
-            "toBlock": hex(end),
-            "address": USDT_CONTRACT,
-            "topics": [TRANSFER_TOPIC, None, self.wallet_topic],
-        }
-        return await self._call("eth_getLogs", [flt]) or []
+        """USDT Transfer logs into the shop wallet in blocks start..end (inclusive).
+
+        The range is read in chunks sized to the current endpoint. A chunk refused for being too
+        wide shrinks that endpoint's span and is retried on the same endpoint; any other error
+        (403, 429, timeout) fails over to the next endpoint. The whole range is read before
+        anything is returned, so a caller never advances its cursor over a half-read span.
+        """
+        logs: list[dict] = []
+        cursor = start
+        problems: list[str] = []
+        stale = 0  # consecutive failures with no forward progress
+        while cursor <= end:
+            if stale >= len(self.urls) * 6:
+                raise RpcError(f"eth_getLogs failed on every endpoint ({'; '.join(problems[-len(self.urls):])})")
+            url = self.urls[self._current]
+            span = self._span.get(url, LOG_SPAN)
+            stop = min(cursor + span - 1, end)
+            flt = {
+                "fromBlock": hex(cursor),
+                "toBlock": hex(stop),
+                "address": USDT_CONTRACT,
+                "topics": [TRANSFER_TOPIC, None, self.wallet_topic],
+            }
+            try:
+                logs += await self._post(url, "eth_getLogs", [flt]) or []
+            except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError, RpcError) as exc:
+                problems.append(f"{urlsplit(url).hostname}: {_describe(exc)}")
+                stale += 1
+                if _is_range_error(exc) and span > MIN_LOG_SPAN:
+                    self._span[url] = max(MIN_LOG_SPAN, span // 4)  # this node wants a smaller range
+                else:
+                    self._advance()  # 403/429/timeout, or already at the floor: try the next endpoint
+                continue
+            cursor = stop + 1
+            stale = 0
+        return logs
 
 
 @dataclass

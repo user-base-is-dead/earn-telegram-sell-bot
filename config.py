@@ -16,9 +16,19 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Public BSC endpoints that allow eth_getLogs. (The bsc-dataseed*.bnbchain.org nodes answer other
-# calls but reject eth_getLogs with "limit exceeded", so they cannot detect payments.)
-DEFAULT_RPC_URLS = ("https://bsc-rpc.publicnode.com", "https://bsc.publicnode.com")
+# Public BSC endpoints for eth_getLogs, in failover order. Several providers are listed on purpose:
+# publicnode serves wide block ranges but returns HTTP 403 to some server IPs, so the scanner must
+# be able to fall back to other providers. Endpoints that cap the block range (1rpc, blxrbdn) are
+# used automatically with a smaller range. (The bsc-dataseed*.bnbchain.org nodes reject eth_getLogs
+# with "limit exceeded" regardless of range, so they are not included.)
+DEFAULT_RPC_URLS = (
+    "https://bsc-rpc.publicnode.com",
+    "https://bsc.publicnode.com",
+    "https://binance.llamarpc.com",
+    "https://bsc.drpc.org",
+    "https://1rpc.io/bnb",
+    "https://bsc.rpc.blxrbdn.com",
+)
 
 
 class ConfigError(Exception):
